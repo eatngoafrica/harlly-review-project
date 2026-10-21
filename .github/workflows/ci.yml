@@ -10,13 +10,14 @@ permissions:
   contents: read
 
 jobs:
-  checks:
-    name: Checks (Python ${{ matrix.python }})
+  python:
+    name: Python ${{ matrix.python }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.14"]
+        # 3.9 = AWS Glue Python shell (extract and load); 3.12 = the dispatcher Lambda
+        python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v4
 
@@ -31,13 +32,35 @@ jobs:
             exit 1
           fi
 
-      - name: Syntax check
-        run: python -m py_compile harlyy_export.py
+      - name: Install
+        run: pip install pyarrow pytest ruff boto3
 
       - name: Lint (undefined names, unused imports, syntax errors)
-        run: |
-          pip install ruff
-          ruff check --select E9,F --target-version py39 --output-format github harlyy_export.py
+        run: ruff check --select E9,F --target-version py39 --output-format github glue lambda tests
 
-      - name: Smoke test (CLI parses, no network)
-        run: python harlyy_export.py --help
+      - name: Tests (offline)
+        run: pytest -q tests
+
+      - name: Smoke test (scripts parse their arguments, no network)
+        run: |
+          python glue/harlyy_extract.py --help
+          python glue/harlyy_load.py --help
+          python glue/harlyy_extract.py --print-ddl > /tmp/ddl.sql
+          diff -u sql/redshift/01_tables.sql /tmp/ddl.sql || (echo "::error::sql/redshift/01_tables.sql is out of date: python glue/harlyy_extract.py --print-ddl > sql/redshift/01_tables.sql" && exit 1)
+
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud_infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Format
+        run: terraform fmt -recursive -check
+      - name: Validate (no AWS access needed)
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+          cd bootstrap && terraform init -backend=false -input=false && terraform validate

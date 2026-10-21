@@ -182,3 +182,24 @@ cython_debug/
 .cursorindexingignore
 # Exported survey data
 output/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+crash.log
+crash.*.log
+*.tfplan
+# Personal overrides and CLI config (may hold tokens)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# Keep .terraform.lock.hcl and terraform.tfvars committed: they pin provider
+# versions and hold no secrets.
+
+# Terraform build output (Lambda zips)
+.build/

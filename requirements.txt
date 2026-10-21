@@ -1,0 +1,8 @@
+# Local development and tests. In AWS, Glue installs pyarrow (--additional-python-modules)
+# and already provides boto3.
+boto3
+pyarrow
+pytest
+ruff
+# Local runs on networks that inspect HTTPS
+truststore
