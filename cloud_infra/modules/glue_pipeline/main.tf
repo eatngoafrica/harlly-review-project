@@ -147,7 +147,7 @@ resource "aws_glue_job" "extract" {
   }
 
   default_arguments = {
-    "--additional-python-modules" = var.python_modules
+    "--additional-python-modules" = var.extract_python_modules
     "--S3_BUCKET"                 = var.bucket_name
     "--S3_PREFIX"                 = var.s3_prefix
     "--HARLYY_BUSINESS_ID"        = var.harlyy_business_id
@@ -180,13 +180,14 @@ resource "aws_glue_job" "load" {
   }
 
   default_arguments = {
-    "--REDSHIFT_WORKGROUP" = var.redshift_workgroup_name
-    "--REDSHIFT_DATABASE"  = var.redshift_database
-    "--REDSHIFT_SCHEMA"    = var.redshift_schema
-    "--STAGING_SCHEMA"     = var.staging_schema
-    "--COPY_ROLE_ARN"      = var.copy_role_arn
-    "--ALERTS_TOPIC_ARN"   = var.alerts_topic_arn
-    "--LOAD_QUEUE_URL"     = aws_sqs_queue.load.url
+    "--additional-python-modules" = var.load_python_modules
+    "--REDSHIFT_WORKGROUP"        = var.redshift_workgroup_name
+    "--REDSHIFT_DATABASE"         = var.redshift_database
+    "--REDSHIFT_SCHEMA"           = var.redshift_schema
+    "--STAGING_SCHEMA"            = var.staging_schema
+    "--COPY_ROLE_ARN"             = var.copy_role_arn
+    "--ALERTS_TOPIC_ARN"          = var.alerts_topic_arn
+    "--LOAD_QUEUE_URL"            = aws_sqs_queue.load.url
   }
 
 }
