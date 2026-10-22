@@ -6,10 +6,14 @@
 -- Harlyy shows the change as points for Smile Score and Resolved, and as a percent for
 -- counts; both are given here. Review stars are all-time averages per platform, as
 -- Harlyy shows them; the review counts are for the period.
+--
+-- Comparing with the dashboard: pick a custom range of whole days in Harlyy. Its
+-- "Last 30 days" starts at the current time of day 30 days ago (e.g. 10:00), which a
+-- whole-day query cannot match.
 
 WITH params AS (
-    SELECT DATE '2026-09-24' AS start_date,
-           DATE '2026-10-23' AS end_date
+    SELECT DATE '2026-09-23' AS start_date,
+           DATE '2026-10-22' AS end_date
 ),
 periods AS (
     SELECT start_date, end_date,
