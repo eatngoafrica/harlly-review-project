@@ -17,7 +17,6 @@ data "aws_redshiftserverless_workgroup" "this" {
 locals {
   extract_job_name = "${var.name_prefix}-extract"
   load_job_name    = "${var.name_prefix}-load"
-  script_base      = "s3://${var.bucket_name}/${var.scripts_prefix}"
 }
 
 # ---- scripts -----------------------------------------------------------------
@@ -139,7 +138,7 @@ resource "aws_glue_job" "extract" {
   command {
     name            = "pythonshell"
     python_version  = "3.9"
-    script_location = "${local.script_base}/${aws_s3_object.extract_script.key}"
+    script_location = "s3://${var.bucket_name}/${aws_s3_object.extract_script.key}"
   }
 
   # A manual backfill can run while the hourly schedule carries on.
@@ -172,7 +171,7 @@ resource "aws_glue_job" "load" {
   command {
     name            = "pythonshell"
     python_version  = "3.9"
-    script_location = "${local.script_base}/${aws_s3_object.load_script.key}"
+    script_location = "s3://${var.bucket_name}/${aws_s3_object.load_script.key}"
   }
 
   # One load at a time, so two runs never merge into the same tables together.
