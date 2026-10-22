@@ -28,9 +28,9 @@ staging_schema          = "harlyy_feedback_staging"
 redshift_copy_role_arn  = "arn:aws:iam::655103423742:role/coldstone-redshift-s3-read-role"
 
 # Schedule: Glue cron in UTC (Lagos is UTC+1, so hour boundaries line up).
-schedule         = "cron(5 * * * ? *)"
-schedule_enabled = true # false deploys everything without starting the hourly runs
+schedule = "cron(5 * * * ? *)"
 
+schedule_enabled = true
 # Failure emails (each address must confirm the AWS subscription email)
 alert_emails = ["chinyere.nwigwe@eatngo-africa.com"]
 

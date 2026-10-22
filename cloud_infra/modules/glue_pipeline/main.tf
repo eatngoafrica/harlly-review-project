@@ -17,7 +17,6 @@ data "aws_redshiftserverless_workgroup" "this" {
 locals {
   extract_job_name = "${var.name_prefix}-extract"
   load_job_name    = "${var.name_prefix}-load"
-  script_base      = "s3://${var.bucket_name}/${var.scripts_prefix}"
 }
 
 # ---- scripts -----------------------------------------------------------------
@@ -139,7 +138,7 @@ resource "aws_glue_job" "extract" {
   command {
     name            = "pythonshell"
     python_version  = "3.9"
-    script_location = "${local.script_base}/${aws_s3_object.extract_script.key}"
+    script_location = "s3://${var.bucket_name}/${aws_s3_object.extract_script.key}"
   }
 
   # A manual backfill can run while the hourly schedule carries on.
@@ -148,7 +147,7 @@ resource "aws_glue_job" "extract" {
   }
 
   default_arguments = {
-    "--additional-python-modules" = var.python_modules
+    "--additional-python-modules" = var.extract_python_modules
     "--S3_BUCKET"                 = var.bucket_name
     "--S3_PREFIX"                 = var.s3_prefix
     "--HARLYY_BUSINESS_ID"        = var.harlyy_business_id
@@ -172,7 +171,7 @@ resource "aws_glue_job" "load" {
   command {
     name            = "pythonshell"
     python_version  = "3.9"
-    script_location = "${local.script_base}/${aws_s3_object.load_script.key}"
+    script_location = "s3://${var.bucket_name}/${aws_s3_object.load_script.key}"
   }
 
   # One load at a time, so two runs never merge into the same tables together.
@@ -181,13 +180,14 @@ resource "aws_glue_job" "load" {
   }
 
   default_arguments = {
-    "--REDSHIFT_WORKGROUP" = var.redshift_workgroup_name
-    "--REDSHIFT_DATABASE"  = var.redshift_database
-    "--REDSHIFT_SCHEMA"    = var.redshift_schema
-    "--STAGING_SCHEMA"     = var.staging_schema
-    "--COPY_ROLE_ARN"      = var.copy_role_arn
-    "--ALERTS_TOPIC_ARN"   = var.alerts_topic_arn
-    "--LOAD_QUEUE_URL"     = aws_sqs_queue.load.url
+    "--additional-python-modules" = var.load_python_modules
+    "--REDSHIFT_WORKGROUP"        = var.redshift_workgroup_name
+    "--REDSHIFT_DATABASE"         = var.redshift_database
+    "--REDSHIFT_SCHEMA"           = var.redshift_schema
+    "--STAGING_SCHEMA"            = var.staging_schema
+    "--COPY_ROLE_ARN"             = var.copy_role_arn
+    "--ALERTS_TOPIC_ARN"          = var.alerts_topic_arn
+    "--LOAD_QUEUE_URL"            = aws_sqs_queue.load.url
   }
 
 }

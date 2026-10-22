@@ -109,10 +109,18 @@ variable "schedule_enabled" {
   default     = true
 }
 
-variable "python_modules" {
-  description = "Extra Python packages for the Glue jobs (--additional-python-modules)."
+# Glue's Python shell ships an old boto3 that does not know Redshift Serverless
+# (WorkgroupName), so both jobs pin the version coldstone-web's load jobs use.
+variable "extract_python_modules" {
+  description = "Extra Python packages for the extract job (--additional-python-modules)."
   type        = string
-  default     = "pyarrow==17.0.0"
+  default     = "pyarrow==17.0.0,boto3==1.35.99"
+}
+
+variable "load_python_modules" {
+  description = "Extra Python packages for the load job (--additional-python-modules)."
+  type        = string
+  default     = "boto3==1.35.99"
 }
 
 variable "extract_timeout_minutes" {
