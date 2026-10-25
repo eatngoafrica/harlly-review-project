@@ -14,13 +14,14 @@ Job parameters (Glue passes them as --NAME value):
     --S3_PREFIX            folder in the bucket (default: harlyy)
     --HARLYY_BUSINESS_ID   required: Harlyy business ID
     --HARLYY_SECRET_PARAM  required in AWS: SSM SecureString holding the Harlyy client secret
-    --REVIEWS_FROM         reviews posted before this date are never loaded (default: 2026-01-01).
-                           Keep it as a job default; hourly runs use it.
+    --REVIEWS_FROM         a full-history run loads reviews posted from this date (default:
+                           2026-01-01). Hourly, --hour and --date runs keep every review Harlyy
+                           changes, whatever its age, so older reviews arrive as Harlyy re-syncs them.
     --EVENTS_TOPIC_ARN     SNS topic that receives the success message (starts the load)
     --ALERTS_TOPIC_ARN     SNS topic that receives failures (emailed)
 One-off runs (the next scheduled run is hourly again):
     --full-history true    everything changed before the start of the current hour
-    --reviews-from DATE    reviews from this date or year (2023 / 2023-06-01) for this run only
+    --reviews-from DATE    with --full-history: reviews from this date or year (2023 / 2023-06-01)
     --hour YYYY-MM-DDTHH   one hour, e.g. a missed run
     --date YYYY-MM-DD      one whole day as a single run
     --from-raw true        rebuild Parquet from the run's raw files; no API calls
@@ -202,7 +203,9 @@ class Harlyy:
                     self.requests += 1
                     return json.loads(resp.read() or b"null")
             except urllib.error.HTTPError as e:
-                if e.code not in (429, 500, 502, 503, 504) or attempt == RETRIES:
+                # 403 included: Harlyy has refused a valid key for a moment (metrics,
+                # 2026-10-24 10:00 run); a key that is really revoked still fails after the retries.
+                if e.code not in (403, 429, 500, 502, 503, 504) or attempt == RETRIES:
                     detail = e.read().decode(errors="replace")[:500]
                     raise RuntimeError(f"GET {url.split('?')[0]} failed with HTTP {e.code}: {detail}") from None
             except OSError as e:  # connection reset, timeout, DNS
@@ -239,13 +242,16 @@ def updated_between(start_ms, end_ms):
     return filters
 
 
-def fetch(api, filters, reviews_from_ms):
-    """Records changed in the window, plus every lookup they refer to."""
+def fetch(api, filters, reviews_from_ms=None):
+    """Records changed in the window, plus every lookup they refer to. reviews_from_ms
+    (full history only) leaves out reviews posted before it."""
+    review_filters = list(filters)
+    if reviews_from_ms is not None:
+        review_filters.append({"field": "createdAt", "type": "gte", "value": reviews_from_ms})
     raw = {
         "submissions": api.list("/submissions", "submissions", filters),
         "incidents": api.list("/incidents", "incidents", filters),
-        "reviews": api.list("/reviews", "reviews",
-                            list(filters) + [{"field": "createdAt", "type": "gte", "value": reviews_from_ms}]),
+        "reviews": api.list("/reviews", "reviews", review_filters),
         # Lookups are small; taken whole every run.
         "locations": api.list("/locations", "locations"),
         "labels": api.list("/labels", "labels"),
@@ -766,16 +772,18 @@ def main(argv=None):
         raise SystemExit("--S3_BUCKET is required (or --local-dir for a local test)")
 
     run, start_ms, end_ms, description = plan_run(args)
-    job_default = parse_reviews_from(args.REVIEWS_FROM)
-    reviews_from = parse_reviews_from(args.reviews_from) if args.reviews_from else job_default
-    if reviews_from < job_default:
-        print(f"warning: --reviews-from {reviews_from} is earlier than the job's REVIEWS_FROM {job_default}. "
-              f"Hourly runs will not keep reviews before {job_default} up to date; change REVIEWS_FROM on the job "
-              f"(Terraform) to {reviews_from} as well.")
-    print(f"Run {run}: {description}; reviews posted from {reviews_from}")
+    # The review cut-off only limits a full-history reload; every other run keeps any review
+    # Harlyy changes, so older reviews come in as Harlyy re-syncs them.
+    reviews_from = None
+    if args.full_history:
+        reviews_from = parse_reviews_from(args.reviews_from or args.REVIEWS_FROM)
+    elif args.reviews_from:
+        print("warning: --reviews-from only applies to --full-history; ignored")
+    print(f"Run {run}: {description}; "
+          + (f"reviews posted from {reviews_from}" if reviews_from else "reviews of any age"))
 
     storage = Storage(args.S3_BUCKET, args.S3_PREFIX, args.local_dir)
-    base_message = {"stage": "extract", "run": run, "job_run_id": args.JOB_RUN_ID}
+    base_message = {"stage": "extract", "run": run, "window": description, "job_run_id": args.JOB_RUN_ID}
     try:
         if args.from_raw:
             print("Rebuilding from raw files (no API calls)")
@@ -785,7 +793,8 @@ def main(argv=None):
                 raise SystemExit("--HARLYY_BUSINESS_ID is required")
             recorder = Recorder()
             api = Harlyy(args.HARLYY_BUSINESS_ID, api_token(args), recorder)
-            reviews_from_ms = ms(datetime.combine(reviews_from, datetime.min.time(), tzinfo=LAGOS))
+            reviews_from_ms = (ms(datetime.combine(reviews_from, datetime.min.time(), tzinfo=LAGOS))
+                               if reviews_from else None)
             try:
                 raw = fetch(api, updated_between(start_ms, end_ms), reviews_from_ms)
             finally:
@@ -811,8 +820,19 @@ def main(argv=None):
     except SystemExit:
         raise
     except Exception as err:
-        publish(args.ALERTS_TOPIC_ARN, "failed", dict(base_message, status="failed", error=str(err)[:1500]))
+        publish(args.ALERTS_TOPIC_ARN, "failed", dict(base_message, status="failed", error=str(err)[:1500],
+                                                      to_rerun=rerun_hint(run)))
         raise
+
+
+def rerun_hint(run):
+    """How to redo a failed run from the Glue console (Run with parameters)."""
+    if run.startswith("business_date=") and "/hour=" in run:
+        day, hour = run[len("business_date="):].split("/hour=")
+        return f"Glue job, Run with parameters: --hour {day}T{hour}. Later hourly runs do not cover this hour."
+    if run.startswith("business_date="):
+        return f"Glue job, Run with parameters: --date {run[len('business_date='):]}"
+    return "Glue job, Run with parameters: --full-history true"
 
 
 if __name__ == "__main__":

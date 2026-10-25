@@ -17,7 +17,7 @@ force_destroy                      = false
 # Harlyy
 harlyy_business_id       = "bus_697b58184eb7844dba40fce0"
 harlyy_secret_param_name = "/harlyy-feedback/prod/harlyy-client-secret"
-reviews_from             = "2026-01-01" # reviews posted before this are never loaded
+reviews_from             = "2026-01-01" # full-history reload only; hourly runs keep re-synced reviews of any age
 s3_prefix                = "harlyy"
 
 # Redshift

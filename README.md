@@ -37,7 +37,7 @@ failures -> SNS alerts -> email
 | Parameter | Effect |
 |---|---|
 | `--full-history true` | everything since Harlyy's first record (reviews from `REVIEWS_FROM`) |
-| `--reviews-from 2023` | reviews from that year or date; also lower `reviews_from` in Terraform so hourly runs keep them current |
+| `--reviews-from 2023` | with `--full-history`: reviews from that year or date. Hourly runs keep every review Harlyy re-syncs, whatever its age |
 | `--hour 2026-10-21T09` | one hour, e.g. a missed run |
 | `--date 2026-10-20` | one whole day |
 | `--from-raw true` | rebuild Parquet from the run's saved raw files, no API calls |

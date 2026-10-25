@@ -9,7 +9,7 @@ The Harlyy pipeline copies Eat'N'Go's customer feedback from Harlyy into Redshif
 | | |
 | --- | --- |
 | Freshness | Hourly; data is at most about an hour old (each run picks up the previous clock hour, Lagos time) |
-| History | Submissions and incidents from Harlyy's first record (18 Mar 2026); reviews posted from 1 Jan 2026 |
+| History | Submissions and incidents from Harlyy's first record (18 Mar 2026); reviews posted from 1 Jan 2026, plus any older review Harlyy has re-synced since 25 Oct 2026 |
 | Matches Harlyy | Submissions, customers, ratings and Smile Score are calculated the way Harlyy calculates them (checked against Harlyy's own figures) |
 | Code | GitHub `eatngoafrica/harlly-review-project`: `glue/` (scripts), `sql/redshift/` (tables, grants, views), `cloud_infra/` (Terraform) |
 | AWS | Account 655103423742, region us-east-1; everything is defined in Terraform |
@@ -325,7 +325,7 @@ A run either loads completely or changes nothing, and re-running any run gives t
 | `--full-history true` | Everything up to the start of the current hour; reviews from the cut-off. Used for the initial backfill; about 10 minutes. Records changed during the hour it runs in are left to the hourly runs, so activate the schedule straight after, or follow with --date for today |
 | `--hour 2026-10-21T09` | One hour (Lagos), e.g. a missed run |
 | `--date 2026-10-20` | One whole day as a single run |
-| `--reviews-from 2025` | Reviews from that year or date, this run only. To keep older reviews current, also lower `reviews_from` in Terraform |
+| `--reviews-from 2025` | With `--full-history`: reviews from that year or date. Not needed otherwise: hourly runs keep every review Harlyy re-syncs, whatever its age |
 | `--from-raw true` | Rebuild the Parquet from that run's saved raw files, without calling Harlyy |
 
 **Re-running only a load:** `eatngo-harlyy-feedback-load` → Run with parameters → `--MANIFEST` = the manifest named in the failure email, e.g. `s3://eatngo-harlyy-feedback/harlyy/manifests/full_history=2026-10-22T08.json`.
@@ -388,6 +388,6 @@ Current analyst access: `lawal_ayobola` has read access and can create views in 
 - **Kenyan days are Nairobi time;** Harlyy uses Lagos time for every store, so Kenyan daily figures can differ near midnight.
 - **Customers summed across surveys** can count a customer twice if they answered two surveys at one store on the same day.
 - **Records deleted in Harlyy stay in Redshift;** the API stops returning them (about 10 incidents a month were deleted in September). Harlyy's own incident count includes deleted ones, so ours is lower by those.
-- **Reviews start 1 Jan 2026.** Older reviews need a one-off run with `--reviews-from` and a lower `reviews_from` in Terraform.
+- **Reviews before 2026 are partial.** The full-history load took reviews from 1 Jan 2026. Since 25 Oct 2026 hourly runs keep any review Harlyy re-syncs, whatever its age, so older reviews arrive gradually; review star averages over all time can therefore differ from Harlyy until they are all in. A full set needs `--full-history true --reviews-from <year>`.
 - **Media-document incidents** cannot be looked up yet; only their IDs are stored.
 - **Personal data:** submissions and submission_answers hold customer names and phone numbers. Grant access accordingly.

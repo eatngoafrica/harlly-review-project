@@ -73,10 +73,10 @@ SELECT
     -- 3rd Party Reviews
     g.reviews_in_period                                                                AS google_reviews,
     g.stars_all_time                                                                   AS google_stars,
-    g.stars_all_time - g.stars_at_prev_end                                             AS google_stars_change,
+    ROUND(g.stars_all_time - g.stars_at_prev_end, 1)                                   AS google_stars_change,
     ch.reviews_in_period                                                               AS chowdeck_reviews,
     ch.stars_all_time                                                                  AS chowdeck_stars,
-    ch.stars_all_time - ch.stars_at_prev_end                                           AS chowdeck_stars_change,
+    ROUND(ch.stars_all_time - ch.stars_at_prev_end, 1)                                 AS chowdeck_stars_change,
     COALESCE(g.reviews_in_period, 0) + COALESCE(ch.reviews_in_period, 0)               AS total_reviews
 FROM cur c
 LEFT JOIN prev pv ON TRUE

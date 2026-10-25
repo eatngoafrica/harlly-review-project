@@ -58,7 +58,7 @@ variable "harlyy_secret_param_arn" {
 }
 
 variable "reviews_from" {
-  description = "Reviews posted before this date are never loaded; hourly runs use it. Lower it before backfilling older reviews."
+  description = "A full-history run loads reviews posted from this date. Hourly runs keep every review Harlyy changes, whatever its age."
   type        = string
   default     = "2026-01-01"
 
