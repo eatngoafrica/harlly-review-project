@@ -1,12 +1,13 @@
--- Smilecard: Smile Score per location for a period, against the target and the
--- previous period of the same length, with the rating breakdown.
--- Matches Harlyy's Smile Score (weighted ratings, rounded down); see glue/harlyy_extract.py
--- SMILE_WEIGHTS. Needs sql/redshift/03_reporting_views.sql.
---
--- Change the dates and target in params. For a region, regional manager or brand view,
--- replace the location columns in level and GROUP BY; for the whole business, group by
--- nothing (remove them).
+/*
+Smilecard: Smile Score per location for a period, against the target and the
+previous period of the same length, with the rating breakdown.
+Matches Harlyy's Smile Score (weighted ratings, rounded down); see glue/harlyy_extract.py
+SMILE_WEIGHTS. Needs sql/redshift/03_reporting_views.sql.
 
+Change the dates and target in params. For a region, regional manager or brand view,
+replace the location columns in level and GROUP BY; for the whole business, group by
+nothing (remove them).
+*/
 WITH params AS (
     SELECT DATE '2026-09-23' AS start_date,
            DATE '2026-10-22' AS end_date,

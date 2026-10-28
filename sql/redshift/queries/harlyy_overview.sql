@@ -1,16 +1,17 @@
--- Harlyy dashboard Overview, from our own tables: Smile Score, Submissions, Total
--- Incidents, Resolved, Rating Breakdown and 3rd Party Reviews, each with the change
--- against the previous period of the same length.
--- Needs sql/redshift/03_reporting_views.sql. Set the period (Lagos dates) in params.
---
--- Harlyy shows the change as points for Smile Score and Resolved, and as a percent for
--- counts; both are given here. Review stars are all-time averages per platform, as
--- Harlyy shows them; the review counts are for the period.
---
--- Comparing with the dashboard: pick a custom range of whole days in Harlyy. Its
--- "Last 30 days" starts at the current time of day 30 days ago (e.g. 10:00), which a
--- whole-day query cannot match.
+/*
+Harlyy dashboard Overview, from our own tables: Smile Score, Submissions, Total
+Incidents, Resolved, Rating Breakdown and 3rd Party Reviews, each with the change
+against the previous period of the same length.
+Needs sql/redshift/03_reporting_views.sql. Set the period (Lagos dates) in params.
 
+Harlyy shows the change as points for Smile Score and Resolved, and as a percent for
+counts; both are given here. Review stars are all-time averages per platform, as
+Harlyy shows them; the review counts are for the period.
+
+Comparing with the dashboard: pick a custom range of whole days in Harlyy. Its
+"Last 30 days" starts at the current time of day 30 days ago (e.g. 10:00), which a
+whole-day query cannot match.
+*/
 WITH params AS (
     SELECT DATE '2026-09-23' AS start_date,
            DATE '2026-10-22' AS end_date

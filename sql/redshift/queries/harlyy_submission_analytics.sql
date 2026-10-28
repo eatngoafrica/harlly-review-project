@@ -1,11 +1,12 @@
--- Harlyy Submission Analytics dashboard, from our own tables: one row per survey and
--- location for a period, with the same measures Harlyy shows (submissions, customers,
--- comments, ratings, Smile Score, incidents, resolved, average time).
--- Needs sql/redshift/03_reporting_views.sql. Set the period (Lagos dates) in params.
---
--- For one total row per survey, remove location_name from SELECT and GROUP BY; for the
--- whole business, remove both survey_name and location_name.
+/*
+Harlyy Submission Analytics dashboard, from our own tables: one row per survey and
+location for a period, with the same measures Harlyy shows (submissions, customers,
+comments, ratings, Smile Score, incidents, resolved, average time).
+Needs sql/redshift/03_reporting_views.sql. Set the period (Lagos dates) in params.
 
+For one total row per survey, remove location_name from SELECT and GROUP BY; for the
+whole business, remove both survey_name and location_name.
+*/
 WITH params AS (
     SELECT DATE '2026-09-23' AS start_date,
            DATE '2026-10-22' AS end_date

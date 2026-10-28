@@ -1,12 +1,16 @@
--- Harlyy Reviews dashboard, from our own tables: Google and Chowdeck reviews for a period,
--- per platform and per store. Needs sql/redshift/03_reporting_views.sql and
--- 04_store_map.sql. Set the period (Lagos dates) in params of each query.
---
--- Stars: for the period here; Harlyy's 3rd Party Reviews card shows all-time stars
--- (see harlyy_overview.sql). Reply time is from the review to our reply.
+/*
+Harlyy Reviews dashboard, from our own tables: Google and Chowdeck reviews for a period,
+per platform and per store. Needs sql/redshift/03_reporting_views.sql and
+04_store_map.sql. Set the period (Lagos dates) in params of each query.
+
+Stars: for the period here; Harlyy's 3rd Party Reviews card shows all-time stars
+(see harlyy_overview.sql). Reply time is from the review to our reply.
+*/
 
 
--- 1. Per platform: totals, stars, rating breakdown, sentiment, replies.
+/*
+1. Per platform: totals, stars, rating breakdown, sentiment, replies.
+*/
 WITH params AS (
     SELECT DATE '2026-09-23' AS start_date,
            DATE '2026-10-22' AS end_date
@@ -33,9 +37,11 @@ GROUP BY r.source
 ORDER BY r.source;
 
 
--- 2. Per store: the same figures, lowest stars first. Store comes from the company store
---    master (location, or the listing for Chowdeck), so Google and Chowdeck reviews of one
---    store sit together.
+/*
+2. Per store: the same figures, lowest stars first. Store comes from the company store
+   master (location, or the listing for Chowdeck), so Google and Chowdeck reviews of one
+   store sit together.
+*/
 WITH params AS (
     SELECT DATE '2026-09-23' AS start_date,
            DATE '2026-10-22' AS end_date

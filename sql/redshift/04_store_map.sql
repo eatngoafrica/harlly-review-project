@@ -214,6 +214,8 @@ INSERT INTO harlyy_feedback_analytics.store_map_overrides (id_type, harlyy_id, s
     ('listing', 'lst_69b0271f8ee5963122c0b67d', 51836, 'Google: Domino''s Pizza - Ilorin - Kwara Mall'),
     ('listing', 'lst_69b0271d8ee5963122c0b5ab', 51827, 'Google: Domino''s Pizza - Port Harcourt - PH-Olusegun Obasanjo'),
     ('listing', 'lst_6a727ede7df4a367e01dbee1', 57341, 'Google: Domino''s Pizza - Trafford Park (KE)'),
+    ('listing', 'lst_69b0271b8ee5963122c0b4c3', 51848, 'Google: Domino''s Pizza - Kano - Zoo Road (= Bompai Road, confirmed by operations)'),
+    ('listing', 'lst_6a6d38d93f335d55604c4bec', 24583, 'Google: Cold Stone Creamery - Rubis Waiyaki Way (KE, = Rubis Kianda, confirmed by operations)'),
     ('listing', 'lst_69b027368ee5963122c0c057', NULL,  'Google: Cold Stone / Dominos Pizza (check: which store?)');
 COMMIT;
 
@@ -249,11 +251,32 @@ INSERT INTO harlyy_feedback_analytics.store_aliases (brand, alias, store_number)
     ('CSC', 'Sangotoedo',     23613),
     ('DP',  'Ologolo',        51824),   -- Jakande (confirmed by operations)
     ('CSC', 'Ologolo',        23837),
-    ('PB',  'Ologolo',        6231);
+    ('PB',  'Ologolo',        6231),
+    ('PB',  'Wuse',           264),     -- Wuse II
+    ('PB',  'Ikorodu',        273);     -- PB's only Ikorodu store (TOS Benson)
 COMMIT;
 
 
--- vw_store_map: one row per Harlyy location and per mapped review listing.
+-- Region for review listings whose store is not in the store master (closed, new, or
+-- not ours to number), so vw_review_actions can still group them. Use the same region
+-- names as Harlyy / regional_bu. A listing that gets a store later no longer needs a row.
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.listing_regions (
+    listing_id VARCHAR(128) NOT NULL,
+    region     VARCHAR(512) NOT NULL,
+    note       VARCHAR(256)
+);
+
+BEGIN;
+DELETE FROM harlyy_feedback_analytics.listing_regions;
+INSERT INTO harlyy_feedback_analytics.listing_regions (listing_id, region, note) VALUES
+    ('lst_69b0270d8ee5963122c0acaf', 'Island',  'Google: Cold Stone Creamery The Palms Lekki (Lekki, Lagos; confirmed by operations)'),
+    ('lst_69b027178ee5963122c0b2ef', 'Mainland', 'Google: Domino''s Pizza Aggrey Road (near Yaba, Lagos; confirmed by operations)'),
+    ('lst_6aac8089a1c2cf26a9718cc0', 'Nairobi', 'Google: Cold Stone Creamery- Shell Umoja (KE; check: which store?)');
+COMMIT;
+
+
+-- vw_store_map: one row per Harlyy location and per mapped review listing (manual link
+-- in store_map_overrides, else matched by name).
 -- Join on map_key: 'location:<location_id>' or 'listing:<listing_id>'.
 CREATE OR REPLACE VIEW harlyy_feedback_analytics.vw_store_map AS
 WITH master AS (
@@ -261,6 +284,35 @@ WITH master AS (
            UPPER(TRIM(brand)) || ' ' || UPPER(TRIM(REGEXP_REPLACE(store_name, '[[:space:]]+', ' '))) AS match_key,
            country
     FROM public.pulse_store_master_map
+),
+-- Review listings with no manual link are matched by name: the master store name (or a
+-- store_aliases name) found inside the listing name, same brand and country, letters
+-- and digits only ("…Kano - Awka - Awka" -> DP AWKA). The longest name wins, so
+-- "Ikota" is not read as "Ota". Listings naming no master store stay unlinked.
+name_candidates AS (
+    SELECT UPPER(TRIM(brand)) AS brand, country, store_number,
+           REGEXP_REPLACE(UPPER(store_name), '[^A-Z0-9]', '') AS name_key
+    FROM public.pulse_store_master_map
+    UNION ALL
+    SELECT UPPER(TRIM(a.brand)), p.country, a.store_number,
+           REGEXP_REPLACE(UPPER(a.alias), '[^A-Z0-9]', '')
+    FROM harlyy_feedback_analytics.store_aliases a
+    JOIN public.pulse_store_master_map p ON p.store_number = a.store_number
+),
+listing_names AS (
+    SELECT r.listing_id,
+           MAX(r.listing_name)                                          AS listing_name,
+           MAX(r.country_code)                                          AS country_code,
+           REGEXP_REPLACE(UPPER(MAX(r.listing_name)), '[^A-Z0-9]', '')  AS name_key,
+           CASE WHEN UPPER(MAX(r.listing_name)) LIKE 'DOMINO%'       THEN 'DP'
+                WHEN UPPER(MAX(r.listing_name)) LIKE 'COLD%STONE%'   THEN 'CSC'
+                WHEN UPPER(MAX(r.listing_name)) LIKE 'PINKBERRY%'    THEN 'PB'
+                WHEN UPPER(MAX(r.listing_name)) LIKE 'PASTRY PLANET%' THEN 'PP' END AS brand
+    FROM harlyy_feedback_analytics.reviews r
+    WHERE r.listing_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM harlyy_feedback_analytics.store_map_overrides o
+                      WHERE o.id_type = 'listing' AND o.harlyy_id = r.listing_id)
+    GROUP BY r.listing_id
 ),
 mapped AS (
     SELECT 'location'                                                   AS id_type,
@@ -282,6 +334,20 @@ mapped AS (
     SELECT 'listing', o.harlyy_id, CAST(o.note AS VARCHAR(512)), o.store_number, 'manual', o.note
     FROM harlyy_feedback_analytics.store_map_overrides o
     WHERE o.id_type = 'listing'
+    UNION ALL
+    SELECT 'listing', x.listing_id, CAST(x.listing_name AS VARCHAR(512)), x.store_number,
+           'name match', CAST(NULL AS VARCHAR(256))
+    FROM (
+        SELECT l.listing_id, l.listing_name, c.store_number,
+               ROW_NUMBER() OVER (PARTITION BY l.listing_id
+                                  ORDER BY LEN(c.name_key) DESC, c.store_number) AS rn
+        FROM listing_names l
+        JOIN name_candidates c
+          ON c.brand = l.brand
+         AND (l.country_code IS NULL OR c.country = l.country_code)
+         AND POSITION(c.name_key IN l.name_key) > 0
+    ) x
+    WHERE x.rn = 1
 )
 SELECT x.id_type || ':' || x.harlyy_id AS map_key,
        x.id_type,

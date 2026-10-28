@@ -82,9 +82,14 @@ WITH NO SCHEMA BINDING;
 --    priority for replying:
 --      1 = negative and not replied   2 = mixed / 3-star and not replied
 --      3 = positive and not replied   4 = already replied
---    Google listings are linked to a Harlyy location, so they get region and regional
---    manager. Chowdeck listings are not linked in Harlyy: they show the listing name and
---    brand, with region and regional_manager blank until someone links them in Harlyy.
+--    Region and regional manager come from the review's Harlyy location. Where that is
+--    missing or has no region (all Chowdeck listings, some Google locations), they come
+--    from another Harlyy location of the same store, via 04_store_map.sql. If no Harlyy
+--    location of the store has a region (Kenya), region is the store master's
+--    regional_bu (same names as Harlyy's for Nigeria) and regional_manager stays blank.
+--    A listing whose store is not in the master takes region from listing_regions
+--    (04_store_map.sql); otherwise both are blank.
+--    location_id is the review's own location, else the borrowed one.
 --    Reply times: *_minutes for sorting and filtering, *_text for reading
 --    (45m, 3h 05m, 8d 19h).
 -- ---------------------------------------------------------------------------------
@@ -127,15 +132,34 @@ FROM (
            r.brand,
            COALESCE(l.location_name, r.listing_name)                            AS store,
            r.listing_name,
-           r.location_id,
+           COALESCE(r.location_id, sl.location_id)                              AS location_id,
            COALESCE(l.country_code, r.country_code)                             AS country_code,
-           l.state,
-           COALESCE(l.city, r.city)                                             AS city,
-           l.region,
-           l.regional_manager,
+           COALESCE(l.state, sl.state)                                          AS state,
+           COALESCE(l.city, sl.city, r.city)                                    AS city,
+           COALESCE(l.region, sl.region, sml.regional_bu, smt.regional_bu, lr.region) AS region,
+           COALESCE(l.regional_manager, sl.regional_manager)                    AS regional_manager,
            r.source_url
     FROM harlyy_feedback_analytics.reviews r
     LEFT JOIN harlyy_feedback_analytics.locations l ON l.location_id = r.location_id
+    -- Fill what the review's own location lacks (or all of it, for a listing with no
+    -- location) from the Harlyy location of the same store that has a region:
+    -- review -> store_number (04_store_map.sql) -> best Harlyy location for that store.
+    -- The listing's link is the fallback when the location has none (or is missing
+    -- from locations, as happens when Harlyy archives one).
+    LEFT JOIN harlyy_feedback_analytics.vw_store_map sml ON sml.map_key = 'location:' || r.location_id
+    LEFT JOIN harlyy_feedback_analytics.vw_store_map smt ON smt.map_key = 'listing:' || r.listing_id
+    LEFT JOIN (
+        SELECT m.store_number, sl.location_id, sl.state, sl.city, sl.region, sl.regional_manager,
+               ROW_NUMBER() OVER (PARTITION BY m.store_number
+                                  ORDER BY CASE WHEN sl.region IS NOT NULL THEN 0 ELSE 1 END,
+                                           CASE WHEN sl.regional_manager IS NOT NULL THEN 0 ELSE 1 END,
+                                           sl.location_id) AS rn
+        FROM harlyy_feedback_analytics.vw_store_map m
+        JOIN harlyy_feedback_analytics.locations sl ON sl.location_id = m.harlyy_id
+        WHERE m.id_type = 'location' AND m.store_number IS NOT NULL
+    ) sl ON sl.store_number = COALESCE(sml.store_number, smt.store_number) AND sl.rn = 1
+    -- Last resort for listings whose store is not in the master (04_store_map.sql).
+    LEFT JOIN harlyy_feedback_analytics.listing_regions lr ON lr.listing_id = r.listing_id
     WHERE r.status = 'active'
 ) r
 WITH NO SCHEMA BINDING;
