@@ -90,8 +90,11 @@ WITH NO SCHEMA BINDING;
 --    A listing whose store is not in the master takes region from listing_regions
 --    (04_store_map.sql); otherwise both are blank.
 --    location_id is the review's own location, else the borrowed one.
---    Reply times: *_minutes for sorting and filtering, *_text for reading
---    (45m, 3h 05m, 8d 19h).
+--    review_created_at is when the review was left, replied_at when we replied (blank
+--    if not yet). Reply time: minutes_to_reply for sorting and averages,
+--    time_to_reply_text for reading (45m, 3h 05m, 5d 19h, 23 days, 9 months;
+--    months are 30 days). days_waiting: whole days since an unreplied review was
+--    left (blank once replied).
 -- ---------------------------------------------------------------------------------
 CREATE OR REPLACE VIEW harlyy_feedback_analytics.vw_review_actions AS
 SELECT r.*,
@@ -99,14 +102,10 @@ SELECT r.*,
             WHEN r.minutes_to_reply < 60     THEN CAST(r.minutes_to_reply AS VARCHAR) || 'm'
             WHEN r.minutes_to_reply < 1440   THEN CAST(r.minutes_to_reply / 60 AS VARCHAR) || 'h '
                                                   || LPAD(CAST(r.minutes_to_reply % 60 AS VARCHAR), 2, '0') || 'm'
-            ELSE CAST(r.minutes_to_reply / 1440 AS VARCHAR) || 'd '
-                 || CAST((r.minutes_to_reply % 1440) / 60 AS VARCHAR) || 'h' END        AS time_to_reply_text,
-       CASE WHEN r.minutes_waiting IS NULL THEN NULL
-            WHEN r.minutes_waiting < 60     THEN CAST(r.minutes_waiting AS VARCHAR) || 'm'
-            WHEN r.minutes_waiting < 1440   THEN CAST(r.minutes_waiting / 60 AS VARCHAR) || 'h '
-                                                 || LPAD(CAST(r.minutes_waiting % 60 AS VARCHAR), 2, '0') || 'm'
-            ELSE CAST(r.minutes_waiting / 1440 AS VARCHAR) || 'd '
-                 || CAST((r.minutes_waiting % 1440) / 60 AS VARCHAR) || 'h' END         AS time_waiting_text
+            WHEN r.minutes_to_reply < 10080  THEN CAST(r.minutes_to_reply / 1440 AS VARCHAR) || 'd '
+                                                  || CAST((r.minutes_to_reply % 1440) / 60 AS VARCHAR) || 'h'
+            WHEN r.minutes_to_reply < 86400  THEN CAST(r.minutes_to_reply / 1440 AS VARCHAR) || ' days'
+            ELSE CAST(r.minutes_to_reply / 43200 AS VARCHAR) || ' months' END           AS time_to_reply_text
 FROM (
     SELECT r.review_id,
            r.source,
@@ -124,7 +123,7 @@ FROM (
            r.replied_at,
            DATEDIFF(minute, r.review_created_at, r.replied_at)                  AS minutes_to_reply,
            CASE WHEN NOT r.has_reply
-                THEN DATEDIFF(minute, r.review_created_at, GETDATE()) END      AS minutes_waiting,
+                THEN DATEDIFF(minute, r.review_created_at, GETDATE()) / 1440 END AS days_waiting,
            CASE WHEN r.has_reply                                     THEN 4
                 WHEN r.rating <= 2 OR r.sentiment = 'negative'       THEN 1
                 WHEN r.rating = 3  OR r.sentiment = 'mixed'          THEN 2
@@ -166,9 +165,9 @@ WITH NO SCHEMA BINDING;
 
 
 -- Quick react: unreplied negative and mixed reviews from the last 7 days, worst first.
--- SELECT action_priority, time_waiting_text, source, brand, store, region, regional_manager,
+-- SELECT action_priority, days_waiting, review_created_at, source, brand, store, region, regional_manager,
 --        rating, sentiment, LEFT(content, 200) AS content, source_url
 -- FROM harlyy_feedback_analytics.vw_review_actions
 -- WHERE action_priority IN (1, 2)
 --   AND review_created_at >= DATEADD(day, -7, GETDATE())
--- ORDER BY action_priority, minutes_waiting DESC;
+-- ORDER BY action_priority, review_created_at;
