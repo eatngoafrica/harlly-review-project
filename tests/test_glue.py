@@ -160,6 +160,8 @@ def test_verify_reads_only_this_runs_keys():
     assert "JOIN st.submissions s ON s.submission_id = t.submission_id" in sql
     assert "JOIN st.reviews s ON s.review_id = t.review_id" in sql
     assert load.is_transient("ActiveStatementsExceededException: too many active statements")
+    assert load.is_transient("An error occurred (ValidationException) when calling the ExecuteStatement "
+                             "operation: Redshift endpoint is not available.")
 
 
 def test_child_tables_sorted_on_parent_id():

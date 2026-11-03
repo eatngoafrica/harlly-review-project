@@ -62,7 +62,8 @@ REQUEUE_DELAY_SECONDS = 600
 RETRIES = 3
 TRANSIENT = ["serializable isolation", "connection", "timeout", "throttl", "temporarily", "try again",
              "i/o error", "sending to the backend", "connection reset", "broken pipe", "unexpected eof",
-             "resource busy", "insufficient capacity", "activestatementsexceeded", "active statements"]
+             "resource busy", "insufficient capacity", "activestatementsexceeded", "active statements",
+             "endpoint is not available"]
 IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
