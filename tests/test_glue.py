@@ -224,3 +224,113 @@ def test_ddl_has_target_and_staging_tables():
     for t in extract.TABLES:
         assert f"harlyy_feedback_analytics.{t['name']} (" in text
         assert f"harlyy_feedback_staging.{t['name']} (LIKE harlyy_feedback_analytics.{t['name']})" in text
+
+
+# ---------- Glue Data Catalog ----------------------------------------------------------------
+
+class EntityNotFoundException(Exception):
+    pass
+
+
+class FakeGlue:
+    """Stands in for boto3's glue client: keeps tables and partitions in memory."""
+
+    def __init__(self):
+        self.tables, self.partitions, self.calls = {}, {}, []
+
+    def get_table(self, DatabaseName, Name):
+        self.calls.append("get_table")
+        if Name not in self.tables:
+            raise EntityNotFoundException(Name)
+        return {"Table": self.tables[Name]}
+
+    def create_table(self, DatabaseName, TableInput):
+        self.calls.append("create_table")
+        self.tables[TableInput["Name"]] = TableInput
+
+    def update_table(self, DatabaseName, TableInput):
+        self.calls.append("update_table")
+        self.tables[TableInput["Name"]] = TableInput
+
+    def batch_create_partition(self, DatabaseName, TableName, PartitionInputList):
+        errors = []
+        for p in PartitionInputList:
+            key = (TableName, tuple(p["Values"]))
+            if key in self.partitions:
+                errors.append({"PartitionValues": p["Values"], "ErrorDetail": {"ErrorCode": "AlreadyExistsException"}})
+            else:
+                self.partitions[key] = p["StorageDescriptor"]["Location"]
+        return {"Errors": errors}
+
+
+def test_partition_layout():
+    assert extract.partition_of("business_date=2026-11-04/hour=09") == ("2026-11-04", "09")
+    assert extract.partition_of("business_date=2026-11-04") == ("2026-11-04", "day")
+    assert extract.partition_of("full_history=2026-10-22T08") == ("2026-10-22", "full")
+    assert extract.partition_of("business_date=2026-11-04/hour=day") == ("2026-11-04", "day")
+    storage = extract.Storage("b", "harlyy", local_dir="unused")
+    # Hourly runs keep the folder they have always used.
+    assert extract.processed_folder(storage, "submissions", "business_date=2026-11-04/hour=09") == \
+        "harlyy/processed/submissions/business_date=2026-11-04/hour=09"
+    assert extract.processed_folder(storage, "submissions", "business_date=2026-11-04").endswith(
+        "business_date=2026-11-04/hour=day")
+
+
+def test_catalog_columns_match_tables_and_never_clash_with_partitions():
+    partition_names = {k["Name"] for k in extract.PARTITION_KEYS}
+    for t in extract.TABLES:
+        cols = extract.glue_columns(t)
+        assert [c["Name"] for c in cols] == extract.column_names(t)
+        assert not partition_names & set(extract.column_names(t)), t["name"]
+    types = {c["Name"]: c["Type"] for c in extract.glue_columns(extract.TABLES[0])}
+    assert (types["created_at"], types["created_date"], types["duration_ms"], types["is_completed"]) == \
+        ("timestamp", "date", "bigint", "boolean")
+
+
+def test_register_run_creates_once_and_ignores_existing_partitions(tmp_path):
+    rows = extract.build_tables(raw_fixture())
+    storage = extract.Storage("b", "harlyy", local_dir=tmp_path)
+    run = "business_date=2026-11-04/hour=09"
+    manifest = extract.write_processed(storage, run, rows)
+    glue = FakeGlue()
+    extract.register_run(extract.Catalog("lake", "s3://b/harlyy/processed", glue), storage, run, manifest)
+    assert len(glue.tables) == len(extract.TABLES) == len(glue.partitions)
+    location = glue.partitions[("submissions", ("2026-11-04", "09"))].replace("\\", "/")  # local test on Windows
+    assert location.endswith("processed/submissions/business_date=2026-11-04/hour=09/")
+    # The next run: tables unchanged, so no create or update (no new table versions).
+    glue.calls.clear()
+    extract.register_run(extract.Catalog("lake", "s3://b/harlyy/processed", glue), storage, run, manifest)
+    assert "create_table" not in glue.calls and "update_table" not in glue.calls
+    # A column added in code updates the table.
+    glue.tables["staff"]["StorageDescriptor"]["Columns"] = glue.tables["staff"]["StorageDescriptor"]["Columns"][:-1]
+    extract.Catalog("lake", "s3://b/harlyy/processed", glue).ensure_table(
+        next(t for t in extract.TABLES if t["name"] == "staff"))
+    assert glue.calls.count("update_table") == 1
+
+
+def test_catalog_backfill_registers_existing_files_where_they_are(tmp_path):
+    base = tmp_path / "harlyy" / "processed" / "submissions"
+    for folder in ("business_date=2026-11-03/hour=22", "business_date=2026-11-04/hour=09",
+                   "business_date=2026-11-04", "full_history=2026-10-22T08"):
+        (base / folder).mkdir(parents=True, exist_ok=True)
+        (base / folder / "submissions.parquet").write_bytes(b"x")
+    (base / "notes.txt").write_bytes(b"x")
+    storage = extract.Storage("b", "harlyy", local_dir=tmp_path)
+    glue = FakeGlue()
+    result = extract.backfill_catalog(storage, extract.Catalog("lake", storage.uri("harlyy/processed"), glue))
+    parts = {values: loc for (_, values), loc in glue.partitions.items()}
+    assert set(parts) == {("2026-11-03", "22"), ("2026-11-04", "09"), ("2026-11-04", "day"), ("2026-10-22", "full")}
+    assert "full_history=2026-10-22T08" in parts[("2026-10-22", "full")]  # registered where it is
+    # The old --date file is copied into hour=day, so it is not read on top of the hour folders.
+    assert (base / "business_date=2026-11-04" / "hour=day" / "submissions.parquet").exists()
+    assert len(result["copied"]) == 1 and len(result["skipped"]) == 1
+    # Running it again adds nothing and copies nothing.
+    again = extract.backfill_catalog(storage, extract.Catalog("lake", storage.uri("harlyy/processed"), glue))
+    assert again["added"] == {"submissions": 0} and again["copied"] == []
+
+
+def test_athena_views_file_is_up_to_date():
+    text = (ROOT / "sql" / "athena" / "latest_views.sql").read_text(encoding="utf-8")
+    assert text.splitlines() == (extract.athena_views() + "\n").splitlines()
+    for t in extract.TABLES:
+        assert f"VIEW harlyy_feedback_lake.latest_{t['name']} AS" in text

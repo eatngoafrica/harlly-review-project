@@ -41,6 +41,17 @@ variable "dispatcher_source_dir" {
   type        = string
 }
 
+variable "catalog_database" {
+  description = "Glue Data Catalog database the extract registers the processed Parquet in (for Athena)."
+  type        = string
+  default     = "harlyy_feedback_lake"
+
+  validation {
+    condition     = can(regex("^[a-z0-9_]+$", var.catalog_database))
+    error_message = "catalog_database must be lower case letters, digits and underscores (Athena's rule)."
+  }
+}
+
 # ---- Harlyy ------------------------------------------------------------------
 variable "harlyy_business_id" {
   description = "Harlyy business ID."

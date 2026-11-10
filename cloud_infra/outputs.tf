@@ -32,3 +32,8 @@ output "load_dlq_url" {
   description = "Dead-letter queue: loads that could not be started."
   value       = module.glue_pipeline.load_dlq_url
 }
+
+output "catalog_database" {
+  description = "Glue Data Catalog database for Athena; create the views with sql/athena/latest_views.sql."
+  value       = module.glue_pipeline.catalog_database
+}

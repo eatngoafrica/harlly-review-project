@@ -27,3 +27,8 @@ output "load_dlq_url" {
   description = "Dead-letter queue: loads that could not be started."
   value       = aws_sqs_queue.load_dlq.url
 }
+
+output "catalog_database" {
+  description = "Glue Data Catalog database holding the Harlyy tables for Athena."
+  value       = aws_glue_catalog_database.lake.name
+}

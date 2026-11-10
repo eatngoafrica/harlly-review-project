@@ -19,12 +19,17 @@ Job parameters (Glue passes them as --NAME value):
                            changes, whatever its age, so older reviews arrive as Harlyy re-syncs them.
     --EVENTS_TOPIC_ARN     SNS topic that receives the success message (starts the load)
     --ALERTS_TOPIC_ARN     SNS topic that receives failures (emailed)
+    --CATALOG_DATABASE     Glue Data Catalog database: each run registers its Parquet there
+                           (tables partitioned by business_date and hour), so Athena can read it
+                           without a crawler. Not set: no catalog.
 One-off runs (the next scheduled run is hourly again):
     --full-history true    everything changed before the start of the current hour
     --reviews-from DATE    with --full-history: reviews from this date or year (2023 / 2023-06-01)
     --hour YYYY-MM-DDTHH   one hour, e.g. a missed run
     --date YYYY-MM-DD      one whole day as a single run
     --from-raw true        rebuild Parquet from the run's raw files; no API calls
+    --catalog-backfill true  register every Parquet folder already on S3 in the catalog, then
+                           stop: no API calls, no Redshift load
 
 Local test: python glue/harlyy_extract.py --local-dir output --HARLYY_BUSINESS_ID ...
 (the secret comes from HARLYY_CLIENT_SECRET or a .env file when not running in AWS).
@@ -586,7 +591,7 @@ class Recorder:
 class Storage:
     """Run files on S3, or under a local folder for tests:
         <prefix>/raw/<entity>/<run>/<entity>.jsonl.gz
-        <prefix>/processed/<table>/<run>/<table>.parquet
+        <prefix>/processed/<table>/business_date=D/hour=H/<table>.parquet   (see partition_of)
         <prefix>/manifests/<run>.json
     Re-running a run overwrites its own files and nothing else."""
 
@@ -615,6 +620,19 @@ class Storage:
         if self.local_dir:
             return (self.local_dir / key).read_bytes()
         return self.s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+
+    def list(self, prefix):
+        """Every file key under prefix."""
+        if self.local_dir:
+            return [p.relative_to(self.local_dir).as_posix() for p in (self.local_dir / prefix).rglob("*") if p.is_file()]
+        pages = self.s3.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix)
+        return [obj["Key"] for page in pages for obj in page.get("Contents", [])]
+
+    def copy(self, source_key, key):
+        if self.local_dir:
+            return self.put(key, self.get(source_key))
+        self.s3.copy_object(Bucket=self.bucket, Key=key, CopySource={"Bucket": self.bucket, "Key": source_key})
+        return self.uri(key)
 
     def write_raw(self, run, recorder):
         for entity, records in recorder.records.items():
@@ -649,13 +667,198 @@ def write_processed(storage, run, rows):
         data = rows[t["name"]]
         if not data:
             continue
-        uri = storage.put(f"{storage.prefix}/processed/{t['name']}/{run}/{t['name']}.parquet", to_parquet(t, data))
+        uri = storage.put(f"{processed_folder(storage, t['name'], run)}/{t['name']}.parquet", to_parquet(t, data))
         tables[t["name"]] = {"uri": uri, "rows": len(data), "columns": column_names(t), "key": t["key"],
                              "parent": list(t["parent"]) if t["parent"] else None, "unique": t["unique"]}
     manifest = {"run": run, "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "tables": tables, "has_changes": any(n in tables for n in FACT_TABLES)}
     manifest["uri"] = storage.put(f"{storage.prefix}/manifests/{run}.json", json.dumps(manifest, indent=2).encode())
     return manifest
+
+
+# ---------- Glue Data Catalog (no crawler) ----------------------------------------------------
+# The extract registers what it writes, so Athena can read the Parquet straight away:
+# one catalog table per entry in TABLES, partitioned by business_date and hour.
+#     hourly / --hour run   processed/<table>/business_date=D/hour=HH/
+#     --date run            processed/<table>/business_date=D/hour=day/
+#     --full-history run    processed/<table>/business_date=D/hour=full/
+# A record that changes appears in several partitions (the 10-minute overlap, a --date
+# re-run, lookups refreshed whole every hour); the latest_<table> views keep the newest copy.
+
+DEFAULT_CATALOG_DATABASE = "harlyy_feedback_lake"
+GLUE_TYPES = {"int": "int", "bigint": "bigint", "float": "double", "bool": "boolean", "ts": "timestamp", "date": "date"}
+PARTITION_KEYS = [{"Name": "business_date", "Type": "string"}, {"Name": "hour", "Type": "string"}]
+PARQUET_FORMAT = {
+    "InputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+    "OutputFormat": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+    "SerdeInfo": {"SerializationLibrary": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"},
+}
+# Order of the partitions within a day: a full-history run holds records changed before
+# the hour it ran, a --date run the whole day.
+HOUR_ORDER = """CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END"""
+
+
+def partition_of(run):
+    """Run label (or processed folder) -> (business_date, hour) partition values."""
+    m = re.fullmatch(r"business_date=(\d{4}-\d{2}-\d{2})(?:/hour=(\d{2}|day|full))?", run)
+    if m:
+        return m.group(1), m.group(2) or "day"
+    m = re.fullmatch(r"full_history=(\d{4}-\d{2}-\d{2})T\d{2}", run)
+    if m:
+        return m.group(1), "full"
+    raise ValueError(f"not a run or partition folder: {run!r}")
+
+
+def processed_folder(storage, table_name, run):
+    day, hour = partition_of(run)
+    return f"{storage.prefix}/processed/{table_name}/business_date={day}/hour={hour}"
+
+
+def glue_columns(table):
+    return [{"Name": n, "Type": GLUE_TYPES.get(c, "string")} for n, c in table["columns"]]
+
+
+class Catalog:
+    """Glue Data Catalog tables and partitions for the processed Parquet."""
+
+    def __init__(self, database, root_uri, client=None):
+        if client is None:
+            import boto3
+
+            client = boto3.client("glue")
+        self.glue, self.database, self.root = client, database, root_uri.rstrip("/")
+        self.ready = set()
+
+    def table_input(self, table):
+        return {
+            "Name": table["name"], "TableType": "EXTERNAL_TABLE",
+            "Description": f"Harlyy {table['name']}, one partition per extract run; "
+                           f"latest_{table['name']} keeps the newest copy of each record.",
+            "Parameters": {"classification": "parquet", "EXTERNAL": "TRUE"},
+            "PartitionKeys": PARTITION_KEYS,
+            "StorageDescriptor": dict(PARQUET_FORMAT, Columns=glue_columns(table),
+                                      Location=f"{self.root}/{table['name']}/"),
+        }
+
+    def ensure_table(self, table):
+        """Create the table, or update it only when its columns or folder changed
+        (every update stores a new table version, which counts towards catalog storage)."""
+        if table["name"] in self.ready:
+            return
+        wanted = self.table_input(table)
+        try:
+            current = self.glue.get_table(DatabaseName=self.database, Name=table["name"])["Table"]
+        except Exception as err:
+            if type(err).__name__ != "EntityNotFoundException":
+                raise
+            self.glue.create_table(DatabaseName=self.database, TableInput=wanted)
+            print(f"  catalog: created {self.database}.{table['name']}")
+        else:
+            sd = current.get("StorageDescriptor") or {}
+            have = ([(c["Name"], c["Type"]) for c in sd.get("Columns", [])], sd.get("Location"),
+                    [(k["Name"], k["Type"]) for k in current.get("PartitionKeys", [])])
+            want = ([(c["Name"], c["Type"]) for c in wanted["StorageDescriptor"]["Columns"]],
+                    wanted["StorageDescriptor"]["Location"], [(k["Name"], k["Type"]) for k in PARTITION_KEYS])
+            if have != want:
+                self.glue.update_table(DatabaseName=self.database, TableInput=wanted)
+                print(f"  catalog: updated {self.database}.{table['name']}")
+        self.ready.add(table["name"])
+
+    def add_partitions(self, table, partitions):
+        """partitions: [((business_date, hour), folder uri)]. Partitions already registered
+        are left as they are; re-running a run rewrites the same folder. Returns how many were new."""
+        self.ensure_table(table)
+        sd = self.table_input(table)["StorageDescriptor"]
+        added = 0
+        for i in range(0, len(partitions), 100):  # API limit per call
+            chunk = partitions[i:i + 100]
+            result = self.glue.batch_create_partition(
+                DatabaseName=self.database, TableName=table["name"],
+                PartitionInputList=[{"Values": list(values), "StorageDescriptor": dict(sd, Location=folder.rstrip("/") + "/")}
+                                    for values, folder in chunk])
+            errors = result.get("Errors") or []
+            real = [e for e in errors if e["ErrorDetail"].get("ErrorCode") != "AlreadyExistsException"]
+            if real:
+                raise RuntimeError(f"catalog {table['name']}: {real[0]['ErrorDetail']}")
+            added += len(chunk) - len(errors)
+        return added
+
+
+def register_run(catalog, storage, run, manifest):
+    """Add this run's partition to every table it wrote."""
+    values, added = partition_of(run), 0
+    for t in TABLES:
+        if t["name"] in manifest["tables"]:
+            added += catalog.add_partitions(t, [(values, storage.uri(processed_folder(storage, t["name"], run)))])
+    print(f"Catalog: {catalog.database}, partition business_date={values[0]}/hour={values[1]} "
+          f"({added} new, {len(manifest['tables'])} tables)")
+
+
+def backfill_catalog(storage, catalog):
+    """Register every processed folder already on S3. No Harlyy calls, no Redshift load.
+    Files written before the catalog existed are registered where they are, except an old
+    --date file, which sits in the day folder above the hour folders and is copied into hour=day."""
+    base = f"{storage.prefix}/processed/"
+    names = {t["name"]: t for t in TABLES}
+    keys = set(storage.list(base))
+    found, copied, skipped = {}, [], []
+    # Old full_history= folders first, so a newer business_date=D/hour=full replaces them.
+    for key in sorted(keys, key=lambda k: ("/full_history=" not in k, k)):
+        table, _, rest = key[len(base):].partition("/")
+        run, _, filename = rest.rpartition("/")
+        if table not in names or filename != f"{table}.parquet":
+            skipped.append(key)
+            continue
+        try:
+            values = partition_of(run)
+        except ValueError:
+            skipped.append(key)
+            continue
+        folder = f"{base}{table}/{run}"
+        if re.fullmatch(r"business_date=[\d-]+", run):  # an old --date file
+            folder = f"{base}{table}/{run}/hour=day"
+            if f"{folder}/{filename}" not in keys:
+                storage.copy(key, f"{folder}/{filename}")
+                copied.append(key)
+        found.setdefault(table, {})[values] = storage.uri(folder)
+    added = {name: catalog.add_partitions(names[name], sorted(parts.items())) for name, parts in sorted(found.items())}
+    print(f"Catalog backfill into {catalog.database}: "
+          + ", ".join(f"{name} {n} new of {len(found[name])}" for name, n in added.items()))
+    for key in copied:
+        print(f"  copied old --date file into hour=day: {key}")
+    for key in skipped:
+        print(f"  skipped (not a pipeline Parquet file): {key}")
+    return {"added": added, "copied": copied, "skipped": skipped}
+
+
+def athena_views(database=DEFAULT_CATALOG_DATABASE):
+    """CREATE VIEW latest_<table>: the newest copy of each record, as the Redshift MERGE keeps.
+    Child rows come from the same run as their parent's newest copy (the load replaces them per parent)."""
+    out = [f"-- Athena views over the Glue catalog database {database}: the newest copy of each record.",
+           "-- Generated: python glue/harlyy_extract.py --print-athena-views > sql/athena/latest_views.sql",
+           "-- The Athena console runs one statement at a time.", ""]
+    by_name = {t["name"]: t for t in TABLES}
+    for t in TABLES:
+        cols = ", ".join(column_names(t))
+        if t["parent"]:
+            parent, col = t["parent"]
+            parent_key = by_name[parent]["key"]
+            body = (f"SELECT {', '.join('c.' + c for c in column_names(t))}\n"
+                    f"FROM {database}.{t['name']} c\n"
+                    f"JOIN (\n"
+                    f"    SELECT {parent_key}, business_date, \"hour\",\n"
+                    f"           ROW_NUMBER() OVER (PARTITION BY {parent_key} ORDER BY business_date DESC, {HOUR_ORDER} DESC) AS version\n"
+                    f"    FROM {database}.{parent}\n"
+                    f") p ON p.version = 1 AND p.{parent_key} = c.{col}\n"
+                    f"     AND p.business_date = c.business_date AND p.\"hour\" = c.\"hour\"")
+        else:
+            body = (f"SELECT {cols}\n"
+                    f"FROM (\n"
+                    f"    SELECT *, ROW_NUMBER() OVER (PARTITION BY {t['key']} ORDER BY business_date DESC, {HOUR_ORDER} DESC) AS version\n"
+                    f"    FROM {database}.{t['name']}\n"
+                    f")\nWHERE version = 1")
+        out.append(f"CREATE OR REPLACE VIEW {database}.latest_{t['name']} AS\n{body};\n")
+    return "\n".join(out)
 
 
 # ---------- run ----------------------------------------------------------------------------
@@ -742,6 +945,7 @@ def parse_args(argv):
     p.add_argument("--REVIEWS_FROM", default=DEFAULT_REVIEWS_FROM)
     p.add_argument("--EVENTS_TOPIC_ARN")
     p.add_argument("--ALERTS_TOPIC_ARN")
+    p.add_argument("--CATALOG_DATABASE", help="Glue catalog database to register partitions in; not set: no catalog")
     p.add_argument("--JOB_RUN_ID")  # passed by Glue; included in messages
     p.add_argument("--full-history", dest="full_history", nargs="?", const="true", default="false", type=true_or_false)
     p.add_argument("--reviews-from", dest="reviews_from")
@@ -749,7 +953,11 @@ def parse_args(argv):
     p.add_argument("--date", help="YYYY-MM-DD (Lagos), the whole day as one run")
     p.add_argument("--from-raw", dest="from_raw", nargs="?", const="true", default="false", type=true_or_false)
     p.add_argument("--local-dir", dest="local_dir", help="local test: write here instead of S3, publish nothing")
+    p.add_argument("--catalog-backfill", dest="catalog_backfill", nargs="?", const="true", default="false",
+                   type=true_or_false, help="register the processed files already on S3 in the catalog, then stop")
     p.add_argument("--print-ddl", dest="print_ddl", action="store_true", help="print the Redshift DDL and exit")
+    p.add_argument("--print-athena-views", dest="print_athena_views", action="store_true",
+                   help="print the Athena latest_<table> views and exit")
     args, _ = p.parse_known_args(argv)  # Glue adds arguments of its own
     if args.S3_BUCKET:
         args.S3_BUCKET = args.S3_BUCKET.strip().replace("s3://", "").strip("/")
@@ -763,6 +971,15 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.print_ddl:
         print(ddl())
+        return
+    if args.print_athena_views:
+        print(athena_views(args.CATALOG_DATABASE or DEFAULT_CATALOG_DATABASE))
+        return
+    if args.catalog_backfill:
+        if not (args.S3_BUCKET and args.CATALOG_DATABASE) or args.local_dir:
+            raise SystemExit("--catalog-backfill needs --S3_BUCKET and --CATALOG_DATABASE (run it in Glue)")
+        storage = Storage(args.S3_BUCKET, args.S3_PREFIX)
+        backfill_catalog(storage, Catalog(args.CATALOG_DATABASE, storage.uri(f"{args.S3_PREFIX}/processed")))
         return
     if args.local_dir:
         load_env_file()
@@ -815,6 +1032,16 @@ def main(argv=None):
 
         manifest = write_processed(storage, run, rows)
         print(f"Data quality checks passed; manifest {manifest['uri']}")
+        if args.CATALOG_DATABASE and not args.local_dir:
+            try:
+                register_run(Catalog(args.CATALOG_DATABASE, storage.uri(f"{args.S3_PREFIX}/processed")),
+                             storage, run, manifest)
+            except Exception as err:
+                # The catalog only serves Athena: report it, and let the Redshift load go ahead.
+                publish(args.ALERTS_TOPIC_ARN, "warning", dict(
+                    base_message, status="catalog_failed", error=str(err)[:1500],
+                    note="Parquet was written and the Redshift load continues; only Athena is missing this run",
+                    to_fix="Glue job, Run with parameters: --catalog-backfill true"))
         publish(args.EVENTS_TOPIC_ARN, "success", dict(base_message, status="success", manifest=manifest["uri"],
                                                        has_changes=manifest["has_changes"], rows=counts))
     except SystemExit:

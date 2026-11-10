@@ -98,6 +98,20 @@ data "aws_iam_policy_document" "glue" {
     resources = [aws_sqs_queue.load.arn]
   }
 
+  # The extract registers its own tables and partitions; there is no crawler.
+  statement {
+    sid = "RegisterCatalog"
+    actions = [
+      "glue:GetDatabase", "glue:GetTable", "glue:CreateTable", "glue:UpdateTable",
+      "glue:GetPartition", "glue:BatchCreatePartition",
+    ]
+    resources = [
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:catalog",
+      aws_glue_catalog_database.lake.arn,
+      "arn:aws:glue:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:table/${aws_glue_catalog_database.lake.name}/*",
+    ]
+  }
+
   statement {
     sid       = "RunRedshiftStatements"
     actions   = ["redshift-data:ExecuteStatement", "redshift-data:BatchExecuteStatement"]
@@ -123,6 +137,14 @@ resource "aws_iam_role_policy" "glue" {
   name   = "${var.name_prefix}-glue"
   role   = aws_iam_role.glue.id
   policy = data.aws_iam_policy_document.glue.json
+}
+
+# ---- Glue Data Catalog -------------------------------------------------------------
+# Tables and partitions are created by the extract job from its own table definitions
+# (glue/harlyy_extract.py), so they are not managed here and no crawler is needed.
+resource "aws_glue_catalog_database" "lake" {
+  name        = var.catalog_database
+  description = "Harlyy processed Parquet on S3, for Athena. Registered by ${local.extract_job_name}; latest_<table> views keep the newest copy of each record."
 }
 
 # ---- Glue jobs ---------------------------------------------------------------------
@@ -155,6 +177,7 @@ resource "aws_glue_job" "extract" {
     "--REVIEWS_FROM"              = var.reviews_from
     "--EVENTS_TOPIC_ARN"          = aws_sns_topic.events.arn
     "--ALERTS_TOPIC_ARN"          = var.alerts_topic_arn
+    "--CATALOG_DATABASE"          = aws_glue_catalog_database.lake.name
   }
 
 }

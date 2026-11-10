@@ -16,6 +16,7 @@ failures -> SNS alerts -> email
 | `lambda/load_dispatcher/handler.py` | starts the load job for each successful extract |
 | `sql/redshift/01_tables.sql` | target + staging tables (`python glue/harlyy_extract.py --print-ddl`) |
 | `sql/redshift/02_grants.sql` | Redshift access for the Glue role |
+| `sql/athena/latest_views.sql` | Athena views over the Glue catalog (`python glue/harlyy_extract.py --print-athena-views`) |
 | `cloud_infra/` | Terraform for all of the above |
 | `tests/` | offline tests (`pytest`) |
 
@@ -41,6 +42,17 @@ failures -> SNS alerts -> email
 | `--hour 2026-10-21T09` | one hour, e.g. a missed run |
 | `--date 2026-10-20` | one whole day |
 | `--from-raw true` | rebuild Parquet from the run's saved raw files, no API calls |
+| `--catalog-backfill true` | register the Parquet already on S3 in the Glue catalog (Athena), then stop; no API calls, no load |
+
+## Athena (Glue Data Catalog, no crawler)
+
+Each extract run registers its Parquet in the Glue database `harlyy_feedback_lake`
+(tables partitioned by `business_date` and `hour`; `hour` is `day` for a `--date` run and
+`full` for `--full-history`). Turning it on for an existing deployment:
+
+1. `terraform apply` in `cloud_infra` (creates the database, the permission and the job parameter).
+2. Run the extract job once with `--catalog-backfill true` to register the files already on S3.
+3. In Athena, run each statement in `sql/athena/latest_views.sql` and query the `latest_<table>` views.
 
 ## Local test
 
