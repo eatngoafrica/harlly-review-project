@@ -30,11 +30,13 @@ Files in S3 bucket `eatngo-harlyy-feedback`:
 | Path | Contents |
 | --- | --- |
 | `harlyy/raw/<entity>/<run>/<entity>.jsonl.gz` | Every API response, as received; kept even when a run fails. Written for every entity every run, even when Harlyy returned nothing (an empty file shows the hour was checked) |
-| `harlyy/processed/<table>/<run>/<table>.parquet` | One file per table per run, only for tables with rows that run; what the load COPYs. A table with no new or changed records in an hour has no folder for that hour (lookups are refreshed whole, so they have one every hour) |
+| `harlyy/processed/<table>/business_date=YYYY-MM-DD/hour=HH/<table>.parquet` | One file per table per run, only for tables with rows that run; what the load COPYs and what Athena reads. `hour` is `HH` for hourly runs, `day` for a `--date` run and `full` for a `--full-history` run. A table with no new or changed records in an hour has no folder for that hour (lookups are refreshed whole, so they have one every hour) |
 | `harlyy/manifests/<run>.json` | What a run wrote: files, row counts, columns and keys |
 | `glue-scripts/` | The two Glue scripts, uploaded by Terraform |
 
-`<run>` is `business_date=YYYY-MM-DD/hour=HH` for hourly runs, `business_date=YYYY-MM-DD` for a whole-day re-run and `full_history=YYYY-MM-DDTHH` for a backfill. Old versions of files are kept for 90 days.
+`<run>` (raw files and manifests) is `business_date=YYYY-MM-DD/hour=HH` for hourly runs, `business_date=YYYY-MM-DD` for a whole-day re-run and `full_history=YYYY-MM-DDTHH` for a backfill. Processed files written before 10 Nov 2026 by a `--date` or `--full-history` run used those names as their folder too; the catalog backfill registers them (see Athena below). Old versions of files are kept for 90 days.
+
+**Athena (Glue Data Catalog, no crawler):** every extract run registers the Parquet it wrote in the Glue database `harlyy_feedback_lake`: one table per pipeline table, partitioned by `business_date` and `hour`. Each new run's data can be queried in Athena as soon as the extract finishes. A record that changes appears in several partitions, so query the `latest_<table>` views (`sql/athena/latest_views.sql`), which keep the newest copy of each record, as Redshift does. A failed registration emails a warning but does not stop the Redshift load; fix it with `--catalog-backfill true`. Cost: a few thousand catalog objects a month, inside the Glue free tier (1 million objects, 1 million requests a month); Athena charges $5 per TB scanned.
 
 ## Data model
 
@@ -327,6 +329,7 @@ A run either loads completely or changes nothing, and re-running any run gives t
 | `--date 2026-10-20` | One whole day as a single run |
 | `--reviews-from 2025` | With `--full-history`: reviews from that year or date. Not needed otherwise: hourly runs keep every review Harlyy re-syncs, whatever its age |
 | `--from-raw true` | Rebuild the Parquet from that run's saved raw files, without calling Harlyy |
+| `--catalog-backfill true` | Register every Parquet folder already on S3 in the Athena catalog, then stop. No Harlyy calls, no Redshift load; safe to repeat. Run once after the catalog is first deployed, or after a catalog warning email |
 
 **Re-running only a load:** `eatngo-harlyy-feedback-load` → Run with parameters → `--MANIFEST` = the manifest named in the failure email, e.g. `s3://eatngo-harlyy-feedback/harlyy/manifests/full_history=2026-10-22T08.json`.
 
