@@ -12,8 +12,6 @@ bucket_name = "eatngo-harlyy-feedback"
 versioning_enabled                 = true
 kms_key_arn                        = null # a KMS key ARN, or null for S3-managed encryption
 noncurrent_version_expiration_days = 90   # 0 keeps old versions forever
-raw_retention_days                 = 180  # raw API responses; 0 keeps them forever
-manifest_retention_days            = 180  # run manifests (re-running a load); 0 keeps them forever
 force_destroy                      = false
 
 # Harlyy

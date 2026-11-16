@@ -42,18 +42,6 @@ variable "noncurrent_version_expiration_days" {
   default     = 90
 }
 
-variable "raw_retention_days" {
-  description = "Days to keep raw API responses (<s3_prefix>/raw/), used to investigate or rebuild a run (--from-raw). 0 keeps them forever."
-  type        = number
-  default     = 180
-}
-
-variable "manifest_retention_days" {
-  description = "Days to keep run manifests (<s3_prefix>/manifests/), used to re-run a load (--MANIFEST). 0 keeps them forever."
-  type        = number
-  default     = 180
-}
-
 variable "force_destroy" {
   description = "Allow terraform destroy to delete the bucket even when it still holds objects."
   type        = bool
