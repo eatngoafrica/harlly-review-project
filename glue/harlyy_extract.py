@@ -9,6 +9,11 @@ record saved on the hour is never missed; the load MERGEs, so the overlap cannot
 create duplicates. Records are picked up by updatedAt, so changes to older records
 (an incident resolved, an abandoned survey completed) come through too.
 
+Incident comments (staff notes) are fetched per incident. Adding one does not change
+the incident's updatedAt, so each run also re-reads the comments of incidents created
+in the last COMMENTS_LOOKBACK_DAYS and includes any incident with a comment added or
+edited in the window.
+
 Job parameters (Glue passes them as --NAME value):
     --S3_BUCKET            required: bucket for raw and processed files
     --S3_PREFIX            folder in the bucket (default: harlyy)
@@ -42,10 +47,12 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -62,6 +69,10 @@ PAGE_SIZE = 50  # API maximum
 RETRIES = 3
 OVERLAP_MINUTES = 10
 DEFAULT_REVIEWS_FROM = "2026-01-01"
+# Staff add comments to an incident days after it last changed (up to 3 days seen,
+# Nov 2026), without changing its updatedAt: re-read comments of recent incidents.
+COMMENTS_LOOKBACK_DAYS = 14
+COMMENT_WORKERS = 4  # comments are one API call per incident; a few at a time
 
 # Fixed offsets are safe: neither country uses daylight saving.
 TIMEZONES = {"NG": ("Africa/Lagos", 1), "KE": ("Africa/Nairobi", 3)}
@@ -127,6 +138,13 @@ TABLES = [
     dict(name="incident_metrics", columns=_cols("incident_id:id, metric_id:id, metric_name:name"),
          key=None, parent=("incidents", "incident_id"), unique=["incident_id", "metric_id"],
          dist="DISTKEY (incident_id)", sort="SORTKEY (incident_id)"),
+    # Staff notes on an incident: who wrote what, when; is_resolution_note marks the
+    # note written when resolving it.
+    dict(name="incident_comments", columns=_cols("""
+        comment_id:id, incident_id:id, staff_id:id, content:text, is_resolution_note:bool,
+        attachment_count:int, created_at:ts, updated_at:ts"""),
+         key=None, parent=("incidents", "incident_id"), unique=["comment_id"],
+         dist="DISTKEY (incident_id)", sort="SORTKEY (incident_id)"),
     # Google, Chowdeck and any other platform Harlyy collects from; the store listing's
     # details are copied onto each review.
     dict(name="reviews", columns=_cols("""
@@ -168,7 +186,7 @@ TABLES = [
     dict(name="staff", columns=_cols("staff_id:id, name:name, position:name, status:short, last_active_at:ts"),
          key="staff_id", parent=None, unique=["staff_id"], dist="DISTSTYLE ALL", sort="SORTKEY (staff_id)"),
 ]
-FACT_TABLES = ("submissions", "submission_answers", "incidents", "incident_metrics", "reviews")
+FACT_TABLES = ("submissions", "submission_answers", "incidents", "incident_metrics", "incident_comments", "reviews")
 
 
 def column_names(table):
@@ -197,6 +215,7 @@ class Harlyy:
         self.token = token
         self.recorder = recorder
         self.requests = 0
+        self._lock = threading.Lock()  # comments are fetched from several threads
 
     def _get_json(self, url):
         """GET a JSON document, retrying dropped connections and server errors."""
@@ -205,8 +224,10 @@ class Harlyy:
         for attempt in range(1, RETRIES + 1):
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
+                    body = resp.read()
+                with self._lock:
                     self.requests += 1
-                    return json.loads(resp.read() or b"null")
+                return json.loads(body or b"null")
             except urllib.error.HTTPError as e:
                 # 403 included: Harlyy has refused a valid key for a moment (metrics,
                 # 2026-10-24 10:00 run); a key that is really revoked still fails after the retries.
@@ -239,6 +260,31 @@ class Harlyy:
                 return list(items.values())
             page += 1
 
+    def comments(self, incident_id):
+        """Every comment on one incident. Not recorded here (runs in worker threads)."""
+        items, page = {}, 0
+        while True:
+            params = urllib.parse.urlencode([("page", page), ("pageSize", PAGE_SIZE)])
+            batch = self._get_json(f"{self.base}/incidents/{incident_id}/comments?{params}")["data"]
+            items.update((item["id"], item) for item in batch)
+            if len(batch) < PAGE_SIZE:
+                return list(items.values())
+            page += 1
+
+
+def comments_for(api, incidents):
+    """{incident_id: [comments]} for these incidents, a few API calls at a time."""
+    ids = [inc["id"] for inc in incidents]
+    with ThreadPoolExecutor(max_workers=COMMENT_WORKERS) as pool:
+        found = dict(zip(ids, pool.map(api.comments, ids)))
+    for comments in found.values():
+        api.recorder.add("incident_comments", comments)
+    return found
+
+
+def last_change(comment):
+    return max(comment.get("createdAt") or 0, comment.get("updatedAt") or 0)
+
 
 def updated_between(start_ms, end_ms):
     filters = [{"field": "updatedAt", "type": "lt", "value": end_ms}]
@@ -247,9 +293,11 @@ def updated_between(start_ms, end_ms):
     return filters
 
 
-def fetch(api, filters, reviews_from_ms=None):
+def fetch(api, filters, reviews_from_ms=None, start_ms=None, end_ms=None):
     """Records changed in the window, plus every lookup they refer to. reviews_from_ms
-    (full history only) leaves out reviews posted before it."""
+    (full history only) leaves out reviews posted before it. With a window start
+    (hourly, --hour, --date), incidents created in the COMMENTS_LOOKBACK_DAYS before
+    end_ms whose comments changed since start_ms are added to the run."""
     review_filters = list(filters)
     if reviews_from_ms is not None:
         review_filters.append({"field": "createdAt", "type": "gte", "value": reviews_from_ms})
@@ -264,6 +312,24 @@ def fetch(api, filters, reviews_from_ms=None):
         "staff": api.list("/staff", "staff"),
         "listings": api.list("/listings", "listings"),
     }
+    # Comments of every incident in the run: the load replaces them per incident.
+    incidents = {inc["id"]: inc for inc in raw["incidents"]}
+    comments = comments_for(api, list(incidents.values()))
+    if start_ms is not None and end_ms is not None:
+        since = end_ms - COMMENTS_LOOKBACK_DAYS * 86_400_000
+        recent = [inc for inc in api.list("/incidents", "incidents", [
+                      {"field": "createdAt", "type": "gte", "value": since},
+                      {"field": "createdAt", "type": "lt", "value": end_ms}])
+                  if inc["id"] not in incidents]
+        recent_comments = comments_for(api, recent)
+        added = [inc for inc in recent if any(last_change(c) >= start_ms for c in recent_comments[inc["id"]])]
+        for inc in added:
+            incidents[inc["id"]] = inc
+            comments[inc["id"]] = recent_comments[inc["id"]]
+        print(f"  incident comments: checked {len(recent)} recent incidents, {len(added)} with new comments")
+    raw["incidents"] = list(incidents.values())
+    raw["incident_comments"] = [c for found in comments.values() for c in found]
+    print(f"  incident comments: {len(raw['incident_comments'])} on {len(incidents)} incidents")
     # Listing surveys needs a staff login, but single surveys can be fetched:
     # refresh every survey the run refers to.
     survey_ids = sorted({r["survey"] for r in raw["submissions"] + raw["incidents"] if r.get("survey")})
@@ -498,6 +564,15 @@ def build_tables(raw):
         t["incident_metrics"] += [{"incident_id": inc["id"], "metric_id": mid, "metric_name": metric_name.get(mid)}
                                   for mid in dict.fromkeys(inc.get("metrics") or [])]
 
+    incident_ids = {inc["id"] for inc in raw["incidents"]}
+    t["incident_comments"] = [{
+        "comment_id": c["id"], "incident_id": c.get("source"), "staff_id": c.get("staff"),
+        "content": c.get("content"),
+        "is_resolution_note": str((c.get("metadata") or {}).get("resolveWithComment")).lower() == "true",
+        "attachment_count": len(c.get("attachments") or []),
+        "created_at": utc(c.get("createdAt")), "updated_at": utc(c.get("updatedAt")),
+    } for c in raw.get("incident_comments") or [] if c.get("source") in incident_ids]
+
     t["reviews"] = []
     for rev in raw["reviews"]:
         directory = rev.get("directory") or {}
@@ -575,7 +650,7 @@ def check_quality(rows, raw):
 # ---------- storage ------------------------------------------------------------------------
 
 RAW_ENTITIES = ("submissions", "incidents", "reviews", "locations", "labels", "metrics", "staff",
-                "listings", "surveys", "steps")
+                "listings", "surveys", "steps", "incident_comments")
 
 
 class Recorder:
@@ -642,7 +717,17 @@ class Storage:
     def read_raw(self, run):
         raw = {}
         for entity in RAW_ENTITIES:
-            text = gzip.decompress(self.get(f"{self.prefix}/raw/{entity}/{run}/{entity}.jsonl.gz")).decode("utf-8")
+            key = f"{self.prefix}/raw/{entity}/{run}/{entity}.jsonl.gz"
+            try:
+                body = self.get(key)
+            except Exception as err:
+                # Runs saved before comments were loaded: rebuilding one would empty the
+                # comments of its incidents, so stop instead.
+                if entity == "incident_comments":
+                    raise SystemExit(f"{run} has no raw incident comments (saved before they were loaded); "
+                                     "re-run it with --hour / --date instead of --from-raw") from err
+                raise
+            text = gzip.decompress(body).decode("utf-8")
             raw[entity] = [json.loads(line) for line in text.splitlines() if line]
         raw["steps"] = {step["id"]: step for step in raw["steps"]}
         return raw
@@ -1013,7 +1098,7 @@ def main(argv=None):
             reviews_from_ms = (ms(datetime.combine(reviews_from, datetime.min.time(), tzinfo=LAGOS))
                                if reviews_from else None)
             try:
-                raw = fetch(api, updated_between(start_ms, end_ms), reviews_from_ms)
+                raw = fetch(api, updated_between(start_ms, end_ms), reviews_from_ms, start_ms, end_ms)
             finally:
                 # Raw is kept even when the pull fails: that is when it is needed to investigate.
                 storage.write_raw(run, recorder)

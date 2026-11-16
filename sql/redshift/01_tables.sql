@@ -92,6 +92,19 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.incident_metrics (
 DISTKEY (incident_id)
 SORTKEY (incident_id);
 
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.incident_comments (
+    comment_id VARCHAR(128),
+    incident_id VARCHAR(128),
+    staff_id VARCHAR(128),
+    content VARCHAR(65535),
+    is_resolution_note BOOLEAN,
+    attachment_count INTEGER,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP
+)
+DISTKEY (incident_id)
+SORTKEY (incident_id);
+
 CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.reviews (
     review_id VARCHAR(128),
     source VARCHAR(64),
@@ -242,6 +255,7 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.submissions (LIKE harlyy_feed
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.submission_answers (LIKE harlyy_feedback_analytics.submission_answers);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incidents (LIKE harlyy_feedback_analytics.incidents);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incident_metrics (LIKE harlyy_feedback_analytics.incident_metrics);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incident_comments (LIKE harlyy_feedback_analytics.incident_comments);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.reviews (LIKE harlyy_feedback_analytics.reviews);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.locations (LIKE harlyy_feedback_analytics.locations);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.location_labels (LIKE harlyy_feedback_analytics.location_labels);
