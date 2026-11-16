@@ -67,6 +67,30 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
       noncurrent_version_expiration {
         noncurrent_days = var.noncurrent_version_expiration_days
       }
+
+      # Once an expired object's last old version is gone, remove its leftover
+      # delete marker too, so nothing is left behind in the console.
+      expiration {
+        expired_object_delete_marker = true
+      }
+    }
+  }
+
+  # Current objects under these prefixes are deleted after the given days.
+  dynamic "rule" {
+    for_each = var.expire_prefixes
+
+    content {
+      id     = "expire-${trim(replace(rule.key, "/", "-"), "-")}"
+      status = "Enabled"
+
+      filter {
+        prefix = rule.key
+      }
+
+      expiration {
+        days = rule.value
+      }
     }
   }
 

@@ -31,6 +31,17 @@ variable "noncurrent_version_expiration_days" {
   }
 }
 
+variable "expire_prefixes" {
+  description = "Delete current objects under each key prefix after this many days, e.g. { \"harlyy/raw/\" = 180 }. With versioning, a deleted object is kept as a previous version for noncurrent_version_expiration_days more."
+  type        = map(number)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for days in values(var.expire_prefixes) : days > 0])
+    error_message = "expire_prefixes days must be positive; leave a prefix out to keep its objects."
+  }
+}
+
 variable "force_destroy" {
   description = "Allow deleting the bucket while it still holds objects."
   type        = bool

@@ -12,6 +12,14 @@ module "s3_bucket" {
   kms_key_arn                        = var.kms_key_arn
   noncurrent_version_expiration_days = var.noncurrent_version_expiration_days
   force_destroy                      = var.force_destroy
+
+  # Raw files and manifests expire; processed Parquet (Athena) and the Glue scripts are kept.
+  expire_prefixes = {
+    for prefix, days in {
+      "${var.s3_prefix}/raw/"       = var.raw_retention_days
+      "${var.s3_prefix}/manifests/" = var.manifest_retention_days
+    } : prefix => days if days > 0
+  }
 }
 
 # Harlyy client secret, read by the extract job. Terraform creates it with a
