@@ -37,7 +37,7 @@ jobs:
         run: pip install pyarrow pytest ruff boto3
 
       - name: Lint (undefined names, unused imports, syntax errors)
-        run: ruff check --select E9,F --target-version py39 --output-format github glue lambda tests
+        run: ruff check --select E9,F --target-version py39 --output-format github glue lambda tests tools
 
       - name: Tests (offline)
         run: pytest -q tests
