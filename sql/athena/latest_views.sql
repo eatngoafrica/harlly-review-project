@@ -38,6 +38,16 @@ JOIN (
 ) p ON p.version = 1 AND p.incident_id = c.incident_id
      AND p.business_date = c.business_date AND p."hour" = c."hour";
 
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_incident_comments AS
+SELECT c.comment_id, c.incident_id, c.staff_id, c.content, c.is_resolution_note, c.attachment_count, c.created_at, c.updated_at
+FROM harlyy_feedback_lake.incident_comments c
+JOIN (
+    SELECT incident_id, business_date, "hour",
+           ROW_NUMBER() OVER (PARTITION BY incident_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.incidents
+) p ON p.version = 1 AND p.incident_id = c.incident_id
+     AND p.business_date = c.business_date AND p."hour" = c."hour";
+
 CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_reviews AS
 SELECT review_id, source, listing_id, listing_name, brand, location_id, country_code, city, source_review_id, source_url, rating, title, content, customer_name, has_reply, reply_content, replied_at, sentiment, sentiment_positive, sentiment_negative, sentiment_neutral, status, review_created_at, review_date, updated_at, synced_at, received_at, alert_sent
 FROM (

@@ -1,6 +1,6 @@
 # Harlyy Feedback Pipeline – Data Dictionary & Runbook
 
-Exported 23 Oct 2026 from the shared doc. The PDF in this folder is the same content with the join diagram as drawn in the doc.
+Updated 16 Nov 2026. The PDF in this folder is the same content, with the join diagram drawn.
 
 ## Overview
 
@@ -10,7 +10,7 @@ The Harlyy pipeline copies Eat'N'Go's customer feedback from Harlyy into Redshif
 | --- | --- |
 | Freshness | Hourly; data is at most about an hour old (each run picks up the previous clock hour, Lagos time) |
 | History | Submissions and incidents from Harlyy's first record (18 Mar 2026); reviews posted from 1 Jan 2026, plus any older review Harlyy has re-synced since 25 Oct 2026 |
-| Matches Harlyy | Submissions, customers, ratings and Smile Score are calculated the way Harlyy calculates them (checked against Harlyy's own figures) |
+| Matches Harlyy | Submissions, comments, customers, ratings, Smile Score, incidents and reviews are calculated the way Harlyy calculates them. Last checked 16 Nov 2026 against the Harlyy app for 1–15 Nov: 19 of 20 figures identical, average time within 1% (see Reconciling with the Harlyy app) |
 | Code | GitHub `eatngoafrica/harlly-review-project`: `glue/` (scripts), `sql/redshift/` (tables, grants, views), `cloud_infra/` (Terraform) |
 | AWS | Account 655103423742, region us-east-1; everything is defined in Terraform |
 | Alerts | Failures are emailed (SNS topic `eatngo-harlyy-feedback-alerts`); successful runs are only logged |
@@ -20,7 +20,7 @@ The Harlyy pipeline copies Eat'N'Go's customer feedback from Harlyy into Redshif
 Every hour at :05, the pipeline takes the records created or changed in the previous clock hour and merges them into Redshift. It is the same shape as the coldstone-web pipeline.
 
 1. **Glue trigger** `eatngo-harlyy-feedback-hourly` starts the extract job (cron `5 * * * ? *`, UTC).
-2. **Extract** (`eatngo-harlyy-feedback-extract`, `glue/harlyy_extract.py`): calls the Harlyy API for records whose `updatedAt` falls in the hour (with a 10-minute overlap), saves the raw responses to S3, builds the 13 tables, runs the data quality checks, then writes one Parquet file per table and a manifest.
+2. **Extract** (`eatngo-harlyy-feedback-extract`, `glue/harlyy_extract.py`): calls the Harlyy API for records whose `updatedAt` falls in the hour (with a 10-minute overlap), saves the raw responses to S3, builds the 14 tables (fetching each incident's staff comments as well), runs the data quality checks, then writes one Parquet file per table and a manifest.
 3. **Hand-off:** the extract publishes a success message to SNS `eatngo-harlyy-feedback-events`; it lands in SQS `eatngo-harlyy-feedback-load-queue`, and the Lambda `eatngo-harlyy-feedback-load-dispatcher` starts the load. Messages that cannot be processed for about an hour go to the dead-letter queue `eatngo-harlyy-feedback-load-dlq`.
 4. **Load** (`eatngo-harlyy-feedback-load`, `glue/harlyy_load.py`): COPYs the Parquet files into `harlyy_feedback_staging`, checks them, then MERGEs them into `harlyy_feedback_analytics` in one transaction. One load runs at a time.
 5. **Alerts:** any failure is emailed through SNS `eatngo-harlyy-feedback-alerts`. Hours with no new or changed submissions, incidents or reviews skip the load, so Redshift is not woken for nothing.
@@ -40,23 +40,24 @@ Files in S3 bucket `eatngo-harlyy-feedback`:
 
 ## Data model
 
-13 tables in `harlyy_feedback_analytics`: 5 hold feedback (facts), 8 describe it (lookups). Everything joins on Harlyy IDs. Tables with a key are upserted on it; child tables are replaced per parent whenever the parent changes.
+14 tables in `harlyy_feedback_analytics`: 6 hold feedback (facts), 8 describe it (lookups). Everything joins on Harlyy IDs. Tables with a key are upserted on it; child tables are replaced per parent whenever the parent changes.
 
-| Table | Type | One row per | Key / parent | Rows (full history, 21 Oct 2026) | Distribution / sort |
-| --- | --- | --- | --- | --- | --- |
-| submissions | Fact | survey form, completed or abandoned | submission_id | 4,902 | DISTKEY submission_id, SORTKEY created_date |
-| submission_answers | Fact (child) | answer; one per ticked option | parent submission_id | 31,768 | DISTKEY / SORTKEY submission_id |
-| incidents | Fact | flagged problem (survey or media-document) | incident_id | 1,627 | EVEN, SORTKEY created_date |
-| incident_metrics | Fact (child) | incident × topic | parent incident_id | 792 | DISTKEY / SORTKEY incident_id |
-| reviews | Fact | Google / Chowdeck review, store details included | review_id | 3,980 | EVEN, SORTKEY review_date |
-| locations | Lookup | store or online channel, labels as columns | location_id | 211 | ALL, SORTKEY location_id |
-| location_labels | Lookup (child) | location × label | parent location_id | 993 | ALL, SORTKEY location_id |
-| labels | Lookup | tag such as Region::West | label_id | 46 | ALL, SORTKEY label_id |
-| surveys | Lookup | survey | survey_id | 7 | ALL, SORTKEY survey_id |
-| survey_steps | Lookup | question or screen, archived ones included | step_id | 96 | ALL, SORTKEY step_id |
-| step_options | Lookup (child) | answer option of a choice question | parent step_id | 204 | ALL, SORTKEY step_id |
-| metrics | Lookup | answer option or topic name | metric_id | 162 | ALL, SORTKEY metric_id |
-| staff | Lookup | Harlyy user (staff), for incident owners | staff_id | 67 | ALL, SORTKEY staff_id |
+| Table | Type | One row per | Key / parent | Distribution / sort |
+| --- | --- | --- | --- | --- |
+| submissions | Fact | survey form, completed or abandoned | submission_id | DISTKEY submission_id, SORTKEY created_date |
+| submission_answers | Fact (child) | answer; one per ticked option | parent submission_id | DISTKEY / SORTKEY submission_id |
+| incidents | Fact | flagged problem (survey or media-document) | incident_id | EVEN, SORTKEY created_date |
+| incident_metrics | Fact (child) | incident × topic | parent incident_id | DISTKEY / SORTKEY incident_id |
+| incident_comments | Fact (child) | staff note on an incident | parent incident_id | DISTKEY / SORTKEY incident_id |
+| reviews | Fact | Google / Chowdeck review, store details included | review_id | EVEN, SORTKEY review_date |
+| locations | Lookup | store or online channel, labels as columns | location_id | ALL, SORTKEY location_id |
+| location_labels | Lookup (child) | location × label | parent location_id | ALL, SORTKEY location_id |
+| labels | Lookup | tag such as Region::West | label_id | ALL, SORTKEY label_id |
+| surveys | Lookup | survey | survey_id | ALL, SORTKEY survey_id |
+| survey_steps | Lookup | question or screen, archived ones included | step_id | ALL, SORTKEY step_id |
+| step_options | Lookup (child) | answer option of a choice question | parent step_id | ALL, SORTKEY step_id |
+| metrics | Lookup | answer option or topic name | metric_id | ALL, SORTKEY metric_id |
+| staff | Lookup | Harlyy user (staff), for incident owners | staff_id | ALL, SORTKEY staff_id |
 
 Join map (each arrow runs from the table holding an ID to the table it looks up):
 
@@ -77,6 +78,8 @@ flowchart LR
     incidents -- "assignees, reviewed_by, resolved_by" --> staff
     incident_metrics --> incidents
     incident_metrics --> metrics
+    incident_comments --> incidents
+    incident_comments --> staff
     reviews --> locations
 ```
 
@@ -159,6 +162,20 @@ One row per flagged problem. `type = submission` comes from a survey (usually a 
 | incident_id | text | → incidents (parent) |
 | metric_id, metric_name | text | Topic the incident is about, e.g. Customer Service |
 
+### incident_comments
+
+One row per note a staff member wrote on an incident in Harlyy: the team's response to a survey complaint. Loaded from 16 Nov 2026 (history included after the full-history reload). Adding a note does not change the incident in Harlyy, so every run re-reads the notes of incidents created in the last 14 days; a note added to an older incident arrives the next time that incident changes.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| comment_id | text | Harlyy comment ID (`com_…`) |
+| incident_id | text | → incidents (parent) |
+| staff_id | text | Who wrote it → staff |
+| content | text | The note, e.g. "Called the customer, apologised…" (may contain customer details) |
+| is_resolution_note | boolean | Written when resolving the incident ("resolve with comment") |
+| attachment_count | int | Files attached to the note (the files are not loaded) |
+| created_at, updated_at | timestamp | Written / last edited |
+
 ### reviews
 
 One row per review on Google, Chowdeck or any other platform Harlyy collects, posted on or after the review cut-off (1 Jan 2026). The store listing's details are copied onto each review.
@@ -175,7 +192,7 @@ One row per review on Google, Chowdeck or any other platform Harlyy collects, po
 | rating | int 1–5 | Star rating |
 | title, content | text | Review text (often blank for rating-only reviews) |
 | customer_name | text | Reviewer's display name |
-| has_reply, reply_content, replied_at | boolean, text, timestamp | Your reply, if any |
+| has_reply, reply_content, replied_at | boolean, text, timestamp | Your reply, if any. Harlyy does not record who posted it |
 | sentiment | text | Harlyy's reading: positive, negative, neutral or mixed |
 | sentiment_positive / _negative / _neutral | decimal 0–1 | Harlyy's confidence scores |
 | status | text | active |
@@ -260,7 +277,7 @@ Harlyy users. Emails and phone numbers are not loaded.
 
 | Column | Type | Description |
 | --- | --- | --- |
-| staff_id | text | Key; used by incidents.assignee_ids, reviewed_by, resolved_by and submissions.staff_id |
+| staff_id | text | Key; used by incidents.assignee_ids, reviewed_by, resolved_by, incident_comments.staff_id and submissions.staff_id |
 | name, position, status | text | e.g. Regional Manager Mainland 1 |
 | last_active_at | timestamp | |
 
@@ -297,9 +314,31 @@ Harlyy described the method but not the weights; the weights were worked out fro
 | `vw_review_actions` | Every review with store, region, regional manager, review date and time (review_created_at), reply date and time (replied_at), whole days an unreplied review has waited (days_waiting), time to reply (in minutes, and as text such as 3h 05m, 5d 19h or 9 months) and an action priority (1 negative unreplied, 2 mixed unreplied, 3 positive unreplied, 4 replied); a quick-react query is at the bottom of the file | `sql/redshift/03_reporting_views.sql` |
 | `vw_store_map` | Each Harlyy location (and each linked Chowdeck listing) with its store in the company master `public.pulse_store_master_map`: store_number, area, regional_bu and how it was matched (name match, manual, unmatched). Manual links live in the table `store_map_overrides`, set from the file; checks are at the bottom of the file | `sql/redshift/04_store_map.sql` |
 | `vw_negative_feedback` | One row per negative item for manager alerts: surveys rated 1–2, and Google/Chowdeck reviews rated 1–2 or marked negative. It has a stable `alert_id`, `is_recent` (last 48 hours), customer contact, and the store_number, area and regional_bu to route on | `sql/redshift/05_alert_feed.sql` |
+| `vw_comment_responses` | One row per customer comment (survey text answers and written Google/Chowdeck reviews), answered or not: who commented (name, phone for surveys), when (UTC and local), rating and tone, store, region and regional manager; and the response: `response_status` (Replied / Not replied; Resolved / In review / Open - no response / No incident raised), `responded_by` (staff who resolved or reviewed the survey's incident, else who wrote its note; reviews say "Not recorded by Harlyy"), `assigned_to`, `response_text` (review reply, or the incident's resolution note / latest staff note), `note_count`, `hours_to_response`, `hours_waiting` and an `action_priority` (1 negative unanswered … 4 responded, 5 survey comment with no incident). Ready-made queries for quick response, a period log, per-manager performance, per-staff handling and every staff note are at the bottom of the file | `sql/redshift/06_comment_responses.sql` |
 | Smilecard | Smile Score per location for a period, against the target (64) and the previous period, with the 1–5 star breakdown; lowest first | `sql/redshift/queries/smilecard.sql` |
+| Reconciliation | The Harlyy app's figures for a period next to ours, metric by metric (see below) | `tools/reconcile_with_harlyy.py`, `sql/redshift/queries/reconcile_with_harlyy.sql` |
 
 Analysts creating their own views should create them late-binding (`WITH NO SCHEMA BINDING`) and schema-qualify every table, so pipeline table changes never require dropping their views.
+
+### Reconciling with the Harlyy app
+
+Harlyy's analytics API returns the figures its app shows. To compare a period (whole Lagos days):
+
+1. `python tools/reconcile_with_harlyy.py --start 2026-11-01 --end 2026-11-15` (needs `HARLYY_*` in `.env`; read-only). It prints, per metric, Harlyy's figure next to what the pipeline's own transform produces from the same records, plus a JSON line of Harlyy's figures.
+2. Run `sql/redshift/queries/reconcile_with_harlyy.sql` in Redshift with the same dates (optionally paste the JSON line in, to get the differences). Each Redshift value should equal Harlyy's.
+
+A difference only in Redshift points to a load problem (a missed hour or failed run: see `queries/backfill_check.sql`); a difference in both points to a rule calculated differently. Records changed in the last hour or two may be ahead in Harlyy until the next hourly load.
+
+Result for 1–15 Nov 2026 (checked 16 Nov), Harlyy vs pipeline:
+
+| Metric | Harlyy | Ours | | Metric | Harlyy | Ours |
+| --- | --- | --- | --- | --- | --- | --- |
+| Submissions | 422 | 422 | | Incidents | 42 | 42 |
+| Comments | 167 | 167 | | Incidents reviewed | 37 | 37 |
+| Customers | 155 | 155 | | Incidents resolved | 35 | 35 |
+| Ratings 1 / 2 / 3 / 4 / 5 | 14 / 7 / 21 / 33 / 61 | same | | Reviews | 156 | 156 |
+| Smile Score | 45 | 45 | | Reviews replied | 99 | 99 |
+| Average time (seconds) | 302 | 305 | | Review stars 1 / 2 / 3 / 4 / 5 | 45 / 9 / 26 / 22 / 54 | same |
 
 ## Data quality and guarantees
 
@@ -324,11 +363,11 @@ A run either loads completely or changes nothing, and re-running any run gives t
 
 | Parameter | Effect for that run |
 | --- | --- |
-| `--full-history true` | Everything up to the start of the current hour; reviews from the cut-off. Used for the initial backfill; about 10 minutes. Records changed during the hour it runs in are left to the hourly runs, so activate the schedule straight after, or follow with --date for today |
+| `--full-history true` | Everything up to the start of the current hour; reviews from the cut-off. Used for the initial backfill; about 15 minutes (each incident's comments are one API call, four at a time). Records changed during the hour it runs in are left to the hourly runs, so activate the schedule straight after, or follow with --date for today |
 | `--hour 2026-10-21T09` | One hour (Lagos), e.g. a missed run |
 | `--date 2026-10-20` | One whole day as a single run |
 | `--reviews-from 2025` | With `--full-history`: reviews from that year or date. Not needed otherwise: hourly runs keep every review Harlyy re-syncs, whatever its age |
-| `--from-raw true` | Rebuild the Parquet from that run's saved raw files, without calling Harlyy |
+| `--from-raw true` | Rebuild the Parquet from that run's saved raw files, without calling Harlyy. Runs saved before 16 Nov 2026 have no raw incident comments and are refused (rebuilding them would empty those incidents' notes); re-run them with `--hour` / `--date` instead |
 | `--catalog-backfill true` | Register every Parquet folder already on S3 in the Athena catalog, then stop. No Harlyy calls, no Redshift load; safe to repeat. Run once after the catalog is first deployed, or after a catalog warning email |
 
 **Re-running only a load:** `eatngo-harlyy-feedback-load` → Run with parameters → `--MANIFEST` = the manifest named in the failure email, e.g. `s3://eatngo-harlyy-feedback/harlyy/manifests/full_history=2026-10-22T08.json`.
@@ -388,6 +427,10 @@ Current analyst access: `lawal_ayobola` has read access and can create views in 
 
 - **Chowdeck reviews have no region or regional manager:** Harlyy does not link Chowdeck listings to locations. Linking them in Harlyy fills these in on the next run.
 - **Smile Score can be 1 point above Harlyy** on about 3% of scores, where the exact score is a whole number.
+- **Average time differs from Harlyy by about 1%** (302 s vs 305 s for 1–15 Nov 2026): Harlyy no longer uses exactly updatedAt − createdAt, and does not document its rule.
+- **Who replied to a Google / Chowdeck review is not known:** Harlyy's API gives the reply text and time only. For surveys, the responder is the staff member who reviewed or resolved the incident.
+- **Staff notes added to incidents older than 14 days** arrive only when that incident next changes in Harlyy (adding a note does not change the incident). A `--full-history true` run picks them all up.
+- **Notes deleted in Harlyy** stay in Redshift until their incident next changes.
 - **Kenyan days are Nairobi time;** Harlyy uses Lagos time for every store, so Kenyan daily figures can differ near midnight.
 - **Customers summed across surveys** can count a customer twice if they answered two surveys at one store on the same day.
 - **Records deleted in Harlyy stay in Redshift;** the API stops returning them (about 10 incidents a month were deleted in September). Harlyy's own incident count includes deleted ones, so ours is lower by those.

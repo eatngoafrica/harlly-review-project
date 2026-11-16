@@ -50,7 +50,10 @@ def raw_fixture():
             "locations": [location], "labels": labels, "metrics": [{"id": "mtr_food", "name": "Food Quality  "}],
             "staff": [{"id": "staff_1", "name": "Faith"}], "listings": [listing],
             "surveys": [{"id": "sur_1", "name": "Dominos - Dine-In Survey", "steps": ["step_rating", "step_liked"]}],
-            "steps": {s["id"]: s for s in (rating, liked, contact)}}
+            "steps": {s["id"]: s for s in (rating, liked, contact)},
+            "incident_comments": [{"id": "cmt_1", "type": "incident", "source": "inc_1", "staff": "staff_1",
+                                   "content": "Called the customer", "attachments": [],
+                                   "metadata": {"resolveWithComment": "true"}, "createdAt": MS, "updatedAt": MS}]}
 
 
 def test_tables_pass_quality_checks_and_write_parquet():
@@ -75,6 +78,70 @@ def test_derived_values():
     review = rows["reviews"][0]
     assert (review["brand"], review["country_code"], review["has_reply"]) == ("Pastry Planet", "NG", True)
     assert {i["is_survey_incident"] for i in rows["incidents"]} == {True, False}
+    note = rows["incident_comments"][0]
+    assert (note["incident_id"], note["staff_id"], note["is_resolution_note"], note["attachment_count"]) == \
+        ("inc_1", "staff_1", True, 0)
+
+
+class FakeHarlyy:
+    """Stands in for the Harlyy client in fetch(): list endpoints filtered on createdAt
+    / updatedAt, and comments per incident."""
+
+    def __init__(self, incidents, comments):
+        self.incidents, self._comments, self.recorder = incidents, comments, extract.Recorder()
+        self.comment_calls = []
+
+    def list(self, path, entity, filters=()):
+        records = self.incidents if path == "/incidents" else []
+        for f in filters:
+            op = {"gte": lambda a, b: a >= b, "lt": lambda a, b: a < b}[f["type"]]
+            records = [r for r in records if r.get(f["field"]) is not None and op(r[f["field"]], f["value"])]
+        self.recorder.add(entity, records)
+        return list(records)
+
+    def get(self, path, entity):
+        raise AssertionError(path)
+
+    def comments(self, incident_id):
+        self.comment_calls.append(incident_id)
+        return self._comments.get(incident_id, [])
+
+
+def test_hourly_run_picks_up_comments_added_to_unchanged_recent_incidents():
+    hour = 3_600_000
+    start, end = MS, MS + hour
+    changed = {"id": "inc_changed", "createdAt": MS - 5 * 86_400_000, "updatedAt": MS + 60_000}
+    quiet = {"id": "inc_quiet", "createdAt": MS - 2 * 86_400_000, "updatedAt": MS - 2 * 86_400_000}
+    noted = {"id": "inc_noted", "createdAt": MS - 3 * 86_400_000, "updatedAt": MS - 3 * 86_400_000}
+    old = {"id": "inc_old", "createdAt": MS - 40 * 86_400_000, "updatedAt": MS - 40 * 86_400_000}
+    comments = {"inc_noted": [{"id": "c1", "source": "inc_noted", "createdAt": MS + 120_000}],
+                "inc_quiet": [{"id": "c2", "source": "inc_quiet", "createdAt": MS - 86_400_000}],
+                "inc_old": [{"id": "c3", "source": "inc_old", "createdAt": MS + 60_000}]}
+    api = FakeHarlyy([changed, quiet, noted, old], comments)
+    raw = extract.fetch(api, extract.updated_between(start, end), None, start, end)
+    # changed: in the window; noted: a comment added this hour; quiet: nothing new;
+    # old: outside the lookback (its comment waits until the incident itself changes)
+    assert sorted(i["id"] for i in raw["incidents"]) == ["inc_changed", "inc_noted"]
+    assert [c["id"] for c in raw["incident_comments"]] == ["c1"]
+    assert "inc_old" not in api.comment_calls
+    # Full history: every incident and its comments, no lookback needed.
+    api = FakeHarlyy([changed, quiet, noted, old], comments)
+    raw = extract.fetch(api, extract.updated_between(None, end), None, None, end)
+    assert len(raw["incidents"]) == 4 and len(raw["incident_comments"]) == 3
+
+
+def test_from_raw_refuses_runs_saved_before_comments(tmp_path):
+    storage = extract.Storage("b", "harlyy", local_dir=tmp_path)
+    run = "business_date=2026-11-04/hour=09"
+    for entity in extract.RAW_ENTITIES:
+        if entity != "incident_comments":
+            storage.put(f"harlyy/raw/{entity}/{run}/{entity}.jsonl.gz", extract.gzip.compress(b""))
+    try:
+        storage.read_raw(run)
+    except SystemExit as err:
+        assert "--from-raw" in str(err)
+    else:
+        raise AssertionError("expected SystemExit")
 
 
 def test_quality_catches_duplicates_blank_keys_and_orphans():

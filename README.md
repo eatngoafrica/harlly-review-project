@@ -16,6 +16,9 @@ failures -> SNS alerts -> email
 | `lambda/load_dispatcher/handler.py` | starts the load job for each successful extract |
 | `sql/redshift/01_tables.sql` | target + staging tables (`python glue/harlyy_extract.py --print-ddl`) |
 | `sql/redshift/02_grants.sql` | Redshift access for the Glue role |
+| `sql/redshift/03`–`06_*.sql` | reporting views, store map, negative-feedback alerts, comments and responses (`vw_comment_responses`) |
+| `sql/redshift/queries/` | saved queries: dashboards, smilecard, backfill check, reconciliation with Harlyy |
+| `tools/reconcile_with_harlyy.py` | compares the Harlyy app's figures for a period with ours |
 | `sql/athena/latest_views.sql` | Athena views over the Glue catalog (`python glue/harlyy_extract.py --print-athena-views`) |
 | `cloud_infra/` | Terraform for all of the above |
 | `tests/` | offline tests (`pytest`) |
