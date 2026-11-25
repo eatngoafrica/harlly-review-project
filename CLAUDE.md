@@ -19,7 +19,7 @@ failures -> SNS alerts -> email
 | `glue/harlyy_load.py` | manifest → staging → checks → MERGE (upsert on key; child tables replaced per parent) |
 | `lambda/load_dispatcher/handler.py` | starts the load per successful extract (Python 3.12) |
 | `sql/redshift/01_tables.sql` | **generated**: `python glue/harlyy_extract.py --print-ddl > sql/redshift/01_tables.sql` (CI diffs it) |
-| `sql/redshift/02..06_*.sql` | grants, reporting views, store map, negative-feedback alert feed, comment/response view. Run in number order |
+| `sql/redshift/02..07_*.sql` | grants, reporting views, store map, negative-feedback alert feed, comment/response view, review topics (ours + competitors). Run in number order |
 | `sql/redshift/queries/` | saved analyst queries (dashboards, smilecard, backfill check, reconciliation) |
 | `sql/athena/latest_views.sql` | **generated**: `--print-athena-views` |
 | `tools/reconcile_with_harlyy.py` | compares Harlyy's analytics API (= the Harlyy app) with our transform for a period |
@@ -53,7 +53,7 @@ python tools/reconcile_with_harlyy.py --start YYYY-MM-DD --end YYYY-MM-DD
 - Times: tables store UTC (`*_at`); `*_local` and `*_date` are store-local (Lagos UTC+1, Nairobi UTC+3,
   no DST). Harlyy itself uses Lagos time for every store.
 - Metrics must match Harlyy's rules (see the dictionary's metric table): Smile Score =
-  `FLOOR(100 * SUM(smile_points) / SUM(smile_weight))`; incident counts use `is_survey_incident` only;
+  `FLOOR(100 * SUM(smile_points) / SUM(smile_weight))`; incident counts use `counts_in_harlyy` (survey + review + actionable photo/document incidents; per-survey views use `is_survey_incident`);
   customers = distinct per location per day, summed.
 - Personal data: `submissions.customer_name/customer_phone`, `submission_answers.name/phone_number`.
 - Harlyy API facts not obvious from code: list endpoints max `pageSize` 50; analytics at
@@ -62,6 +62,7 @@ python tools/reconcile_with_harlyy.py --start YYYY-MM-DD --end YYYY-MM-DD
   incident, loaded into `incident_comments`). Adding a note does **not** change the incident's
   `updatedAt`, hence the `COMMENTS_LOOKBACK_DAYS` re-read in `fetch()`.
 - One-off Redshift changes that must precede a deploy go in `sql/redshift/migrations/`.
+- Competitors: only brands in `COMPETITOR_BRANDS` (extract) are loaded; Harlyy endpoints `/competitor-listings`, `/competitor-reviews`, `/brands`; review topic names from `/v2/review-categories/{id}` (not under `/businesses`).
 - CI (`.github/workflows/ci.yml`): ruff, pytest on 3.9 and 3.12, DDL diff, `terraform fmt -check` and
   `validate`. Run the Python checks before proposing a commit.
 - Commit/push only when asked; branch off `main` and open a PR.

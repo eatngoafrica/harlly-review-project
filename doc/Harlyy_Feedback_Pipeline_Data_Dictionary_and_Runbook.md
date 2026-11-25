@@ -40,7 +40,7 @@ Files in S3 bucket `eatngo-harlyy-feedback`:
 
 ## Data model
 
-14 tables in `harlyy_feedback_analytics`: 6 hold feedback (facts), 8 describe it (lookups). Everything joins on Harlyy IDs. Tables with a key are upserted on it; child tables are replaced per parent whenever the parent changes.
+20 tables in `harlyy_feedback_analytics`: 9 hold feedback (facts), 11 describe it (lookups). Competitor tables hold only the brands in `COMPETITOR_BRANDS` (glue/harlyy_extract.py): the main competitors in Nigeria and Kenya. Everything joins on Harlyy IDs. Tables with a key are upserted on it; child tables are replaced per parent whenever the parent changes.
 
 | Table | Type | One row per | Key / parent | Distribution / sort |
 | --- | --- | --- | --- | --- |
@@ -50,6 +50,9 @@ Files in S3 bucket `eatngo-harlyy-feedback`:
 | incident_metrics | Fact (child) | incident × topic | parent incident_id | DISTKEY / SORTKEY incident_id |
 | incident_comments | Fact (child) | staff note on an incident | parent incident_id | DISTKEY / SORTKEY incident_id |
 | reviews | Fact | Google / Chowdeck review, store details included | review_id | EVEN, SORTKEY review_date |
+| review_topics | Fact (child) | sentence × topic in one of our reviews | parent review_id | DISTKEY / SORTKEY review_id |
+| competitor_reviews | Fact | competitor's Google review (reviewer name not loaded) | competitor_review_id | EVEN, SORTKEY review_date |
+| competitor_review_topics | Fact (child) | sentence × topic in a competitor review | parent competitor_review_id | DISTKEY / SORTKEY competitor_review_id |
 | locations | Lookup | store or online channel, labels as columns | location_id | ALL, SORTKEY location_id |
 | location_labels | Lookup (child) | location × label | parent location_id | ALL, SORTKEY location_id |
 | labels | Lookup | tag such as Region::West | label_id | ALL, SORTKEY label_id |
@@ -58,6 +61,9 @@ Files in S3 bucket `eatngo-harlyy-feedback`:
 | step_options | Lookup (child) | answer option of a choice question | parent step_id | ALL, SORTKEY step_id |
 | metrics | Lookup | answer option or topic name | metric_id | ALL, SORTKEY metric_id |
 | staff | Lookup | Harlyy user (staff), for incident owners | staff_id | ALL, SORTKEY staff_id |
+| review_categories | Lookup | review topic and its group | category_id | ALL, SORTKEY category_id |
+| competitor_listings | Lookup | tracked competitor branch on Google | competitor_listing_id | ALL, SORTKEY competitor_listing_id |
+| brands | Lookup | tracked competitor brand | brand_id | ALL, SORTKEY brand_id |
 
 Join map (each arrow runs from the table holding an ID to the table it looks up):
 
@@ -144,7 +150,7 @@ One row per flagged problem. `type = submission` comes from a survey (usually a 
 | --- | --- | --- |
 | incident_id | text | Harlyy incident ID (`inc_…`), key |
 | code | text | Reference shown in Harlyy, e.g. EAT-261020-0004 |
-| type, is_survey_incident | text, boolean | `submission` or `media-document`; true for survey incidents (Harlyy's incident counts use these only) |
+| type, is_survey_incident | text, boolean | `submission` (survey), `review` (Google / Chowdeck review, since 21 Nov 2026) or `media-document`; is_survey_incident is true for `submission`. Harlyy's Total Incidents counts `submission` + `review` |
 | status, is_open | text, boolean | open, in-review or resolved; is_open = not resolved |
 | media_document_id, media_source_id | text | For media-document incidents; Harlyy has no API to look these up yet |
 | submission_id, survey_id, location_id, customer_id, staff_id | text | What the incident came from |
@@ -154,6 +160,8 @@ One row per flagged problem. `type = submission` comes from a survey (usually a 
 | created_at, updated_at, reviewed_at, resolved_at | timestamp | Lifecycle |
 | created_date | date | Local day raised |
 | hours_to_review, hours_to_resolve | decimal | From creation |
+| is_actionable | boolean | Harlyy's `actionable` flag (set on survey and review incidents, and on some photo / document ones) |
+| counts_in_harlyy | boolean | Counted in Harlyy's Total Incidents: every survey and review incident, plus actionable photo / document incidents (all of them from 21 Nov 2026 21:38 UTC; before that only those picked up). Found by testing Harlyy's analytics one incident at a time; use it for any incident count compared with Harlyy |
 
 ### incident_metrics
 
@@ -199,6 +207,41 @@ One row per review on Google, Chowdeck or any other platform Harlyy collects, po
 | review_created_at, review_date | timestamp, date | When it was posted; local day |
 | updated_at, synced_at, received_at | timestamp | Last change in Harlyy; last sync from the platform; received (usually blank) |
 | alert_sent | boolean | Harlyy alerted on it (usually blank) |
+
+### review_topics
+
+Topics customers mention in our reviews: one row per sentence per topic Harlyy tagged it with. Sentences with no topic are left out. Rows are replaced whenever the review changes.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| review_id | text | The review |
+| sentence_no | integer | Sentence's position in the review (1 = first) |
+| category_id | text | Topic; see review_categories |
+| topic, topic_group | text | e.g. Wait Time, Customer Service (copied from review_categories) |
+| sentiment | text | The sentence's: positive, neutral or negative |
+| score_positive / _negative / _neutral | decimal 0–1 | Harlyy's confidence scores for the sentence |
+| sentence_offset, sentence_length | integer | Where the sentence sits in the review text (characters) |
+
+### competitor_reviews
+
+Google reviews of the tracked competitors. Same meaning as the matching `reviews` columns; the reviewer's name is not loaded. Like ours, Harlyy re-syncs old competitor reviews in bulk, so always filter on `review_created_at` / `review_date`, never `updated_at`.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| competitor_review_id | text | Key |
+| competitor_listing_id, listing_name | text | The branch (see competitor_listings) |
+| brand_id, brand | text | Competitor brand, e.g. KFC Nigeria (Harlyy's name) |
+| country_code | text | NG or KE, from the branch's address |
+| source, source_review_id, source_url | text | google; Google's review ID and link |
+| rating, title, content | integer, text | Stars 1–5 and text |
+| has_reply, reply_content, replied_at | boolean, text, timestamp | The competitor's reply |
+| sentiment, sentiment_positive / _negative / _neutral | text, decimal | Harlyy's reading of the whole review |
+| review_created_at, review_date | timestamp, date | When it was posted; local day |
+| updated_at, synced_at | timestamp | Last change in Harlyy; last sync from Google |
+
+### competitor_review_topics
+
+As review_topics, for competitor reviews (`competitor_review_id` instead of `review_id`).
 
 ### locations
 
@@ -281,6 +324,42 @@ Harlyy users. Emails and phone numbers are not loaded.
 | name, position, status | text | e.g. Regional Manager Mainland 1 |
 | last_active_at | timestamp | |
 
+### review_categories
+
+Harlyy's review topics, shared by our reviews and competitors'. Filled from the topics the loaded reviews mention.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| category_id | text | Key |
+| topic | text | e.g. Staff Friendliness, Wait Time, Taste, Order Accuracy |
+| topic_group | text | Customer Service, Food & Beverage, Ambiance or Delivery Experience |
+
+### competitor_listings
+
+Tracked competitor branches on Google (brands in `COMPETITOR_BRANDS`).
+
+| Column | Type | Description |
+| --- | --- | --- |
+| competitor_listing_id | text | Key |
+| name, address | text | e.g. KFC Westlands; Google address |
+| brand_id, brand | text | Competitor brand |
+| country_code | text | NG or KE, from the address (else from the coordinates) |
+| latitude, longitude | decimal | For distance to our stores |
+| source, source_place_id, source_url | text | google; Google place ID and Maps link |
+| google_rating, google_review_count | decimal, integer | All-time stars and review count, from Harlyy's competitor analytics |
+| is_active, is_scraping | boolean | Harlyy's tracking flags |
+| created_at, updated_at, synced_at | timestamp | |
+
+### brands
+
+Tracked competitor brands.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| brand_id | text | Key |
+| brand_name, website_url | text | e.g. Chicken Republic |
+| created_at, updated_at | timestamp | |
+
 ## Reporting views and metric definitions
 
 Use the views below for reporting; they apply Harlyy's rules so our figures match the Harlyy dashboard. Definitions confirmed with Harlyy support and by reconciling against Harlyy's analytics API.
@@ -292,7 +371,7 @@ Use the views below for reporting; they apply Harlyy's rules so our figures matc
 | Comments | Forms with any text answer | `has_comment` |
 | Ratings 1–5 | Every smileys rating, archived questions included | `step_type = 'smileys'` answers |
 | Smile Score | Weighted ratings, normalised to 0–100, rounded down (formula below) | `FLOOR(100.0 * SUM(smile_points) / SUM(smile_weight))` |
-| Incidents, resolved % | Survey incidents only | `is_survey_incident`; resolved / all |
+| Incidents, resolved % | Survey and review incidents, plus actionable photo / document incidents (within 1 of Harlyy on 26 Oct-25 Nov 2026) | `counts_in_harlyy`; resolved / all. Survey-level views (vw_submission_analytics_daily, alert feed) keep survey incidents only |
 | Average time | Simple mean of updatedAt − createdAt | `SUM(total_duration_ms) / SUM(submissions)` |
 | 3rd-party review rating | All-time average per platform | `AVG(rating)` by `source` over all reviews |
 
@@ -311,10 +390,12 @@ Harlyy described the method but not the weights; the weights were worked out fro
 | View / query | What it gives | File |
 | --- | --- | --- |
 | `vw_submission_analytics_daily` | Harlyy's Submission Analytics per local day × survey × location, with brand, state, region, regional manager and channel; every column adds up, so roll up with SUM | `sql/redshift/03_reporting_views.sql` |
-| `vw_review_actions` | Every review with store, region, regional manager, review date and time (review_created_at), reply date and time (replied_at), whole days an unreplied review has waited (days_waiting), time to reply (in minutes, and as text such as 3h 05m, 5d 19h or 9 months) and an action priority (1 negative unreplied, 2 mixed unreplied, 3 positive unreplied, 4 replied); a quick-react query is at the bottom of the file | `sql/redshift/03_reporting_views.sql` |
+| `vw_review_actions` | Every review with store, region, regional manager, review date and time (review_created_at), reply date and time (replied_at), whole days an unreplied review has waited (days_waiting), time to reply (in minutes, and as text such as 3h 05m, 5d 19h or 9 months) and an action priority (1 negative unreplied, 2 mixed unreplied, 3 positive unreplied, 4 replied, 5 unreplied but posted more than 7 days ago: history only, do not contact the customer) and is_recent (posted in the last 7 days). Age is judged by the posting date, because Harlyy re-syncs old Google reviews (some from 2021-2022) in bulk; a quick-react query is at the bottom of the file | `sql/redshift/03_reporting_views.sql` |
 | `vw_store_map` | Each Harlyy location (and each linked Chowdeck listing) with its store in the company master `public.pulse_store_master_map`: store_number, area, regional_bu and how it was matched (name match, manual, unmatched). Manual links live in the table `store_map_overrides`, set from the file; checks are at the bottom of the file | `sql/redshift/04_store_map.sql` |
 | `vw_negative_feedback` | One row per negative item for manager alerts: surveys rated 1–2, and Google/Chowdeck reviews rated 1–2 or marked negative. It has a stable `alert_id`, `is_recent` (last 48 hours), customer contact, and the store_number, area and regional_bu to route on | `sql/redshift/05_alert_feed.sql` |
-| `vw_comment_responses` | One row per customer comment (survey text answers and written Google/Chowdeck reviews), answered or not: who commented (name, phone for surveys), when (UTC and local), rating and tone, store, region and regional manager; and the response: `response_status` (Replied / Not replied; Resolved / In review / Open - no response / No incident raised), `responded_by` (staff who resolved or reviewed the survey's incident, else who wrote its note; reviews say "Not recorded by Harlyy"), `assigned_to`, `response_text` (review reply, or the incident's resolution note / latest staff note), `note_count`, `hours_to_response`, `hours_waiting` and an `action_priority` (1 negative unanswered … 4 responded, 5 survey comment with no incident). Ready-made queries for quick response, a period log, per-manager performance, per-staff handling and every staff note are at the bottom of the file | `sql/redshift/06_comment_responses.sql` |
+| `vw_comment_responses` | One row per customer comment (survey text answers and written Google/Chowdeck reviews), answered or not: who commented (name, phone for surveys), when (UTC and local), rating and tone, store, region and regional manager; and the response: `response_status` (Replied / Not replied; Resolved / In review / Open - no response / No incident raised), `responded_by` (staff who resolved or reviewed the survey's incident, else who wrote its note; reviews say "Not recorded by Harlyy"), `assigned_to`, `response_text` (review reply, or the incident's resolution note / latest staff note), `note_count`, `hours_to_response`, `hours_waiting` and an `action_priority` (1 negative unanswered … 4 responded, 5 survey comment with no incident, 6 unreplied review posted more than 7 days ago: history only, do not contact). Ready-made queries for quick response, a period log, per-manager performance, per-staff handling and every staff note are at the bottom of the file | `sql/redshift/06_comment_responses.sql` |
+| `vw_topic_mentions` | Every topic mention (sentence × topic) in our reviews and the tracked competitors', side by side: `company` (Eat N'Go or the competitor brand), brand, country, review date, topic group, topic and sentiment | `sql/redshift/07_review_topics.sql` |
+| Competitor comparison | Harlyy's Competitors page: per topic group and topic, each company's score, reviews, sentiment split, rank and leader for a period. Review counts match Harlyy; the score is provisional (within ~3 points) until Harlyy confirms its formula | `sql/redshift/queries/competitor_comparison.sql` |
 | Smilecard | Smile Score per location for a period, against the target (64) and the previous period, with the 1–5 star breakdown; lowest first | `sql/redshift/queries/smilecard.sql` |
 | Reconciliation | The Harlyy app's figures for a period next to ours, metric by metric (see below) | `tools/reconcile_with_harlyy.py`, `sql/redshift/queries/reconcile_with_harlyy.sql` |
 
@@ -424,6 +505,8 @@ GRANT ROLE harlyy_maintainer TO lawal_ayobola;   -- and any other maintainer
 Current analyst access: `lawal_ayobola` has read access and can create views in `harlyy_feedback_analytics`.
 
 ## Known limitations
+
+- **Google / Chowdeck stars differ from Harlyy's 3rd Party Reviews card.** Harlyy averages each listing's whole review history (from inception); we average the reviews we hold, posted from 1 Jan 2026 plus older ones Harlyy re-syncs. Recent reviews are lower, so ours come out lower (25 Nov 2026: Google 4.0 vs Harlyy 4.1, Chowdeck 2.9 vs 3.3). Accepted; review counts for a period match.
 
 - **Chowdeck reviews have no region or regional manager:** Harlyy does not link Chowdeck listings to locations. Linking them in Harlyy fills these in on the next run.
 - **Smile Score can be 1 point above Harlyy** on about 3% of scores, where the exact score is a whole number.
