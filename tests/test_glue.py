@@ -43,10 +43,27 @@ def raw_fixture():
                 "resolvedAt": MS + 7200000}
     media = {"id": "inc_2", "type": "media-document", "status": "open", "mediaDocument": "md_1", "createdAt": MS}
     listing = {"id": "lst_1", "name": "Pastry Planet - Lagos - Saka", "coordinates": {"latitude": 6.5}}
+    sentences = [{"offset": 0, "length": 9, "sentiment": "negative", "categories": ["rcat_wait", "rcat_wait"],
+                  "confidenceScore": {"positive": 0.1, "negative": 0.8, "neutral": 0.1}},
+                 {"offset": 10, "length": 5, "sentiment": "neutral", "categories": []}]
     review = {"id": "rev_1", "listing": "lst_1", "directory": {"type": "chowdeck"}, "rating": 1,
-              "reply": {"content": "Sorry", "repliedAt": MS}, "sentiment": {"sentiment": "negative"},
-              "createdAt": MS, "updatedAt": MS}
+              "reply": {"content": "Sorry", "repliedAt": MS},
+              "sentiment": {"sentiment": "negative", "sentences": sentences}, "createdAt": MS, "updatedAt": MS}
+    brands = [{"id": "brand_kfc", "name": "KFC Kenya"}, {"id": "brand_other", "name": "Somewhere Else"}]
+    competitor_listings = [
+        {"id": "clst_1", "name": "KFC Westlands", "brand": "brand_kfc", "formattedAddress": "Nairobi, Kenya",
+         "directory": {"type": "google", "resourceId": "place_1"}, "active": True, "createdAt": MS},
+        {"id": "clst_2", "name": "Other Place", "brand": "brand_other", "formattedAddress": "Lagos, Nigeria"}]
+    competitor_reviews = [
+        {"id": "crev_1", "competitorListing": "clst_1", "directory": {"type": "google"}, "rating": 2,
+         "customerName": "Someone", "sentiment": {"sentiment": "negative", "sentences": sentences[:1]},
+         "createdAt": MS, "updatedAt": MS},
+        {"id": "crev_2", "competitorListing": "clst_2", "rating": 5, "createdAt": MS, "updatedAt": MS}]
     return {"submissions": [submission], "incidents": [incident, media], "reviews": [review],
+            "competitor_reviews": competitor_reviews, "competitor_listings": competitor_listings, "brands": brands,
+            "review_categories": [{"id": "rcat_wait", "name": "Wait Time", "type": "Customer Service"}],
+            "competitor_listing_ratings": [{"id": "clst_1", "rating": 4.25,
+                                            "ratingsToDate": {"four": 3, "five": 1}}],
             "locations": [location], "labels": labels, "metrics": [{"id": "mtr_food", "name": "Food Quality  "}],
             "staff": [{"id": "staff_1", "name": "Faith"}], "listings": [listing],
             "surveys": [{"id": "sur_1", "name": "Dominos - Dine-In Survey", "steps": ["step_rating", "step_liked"]}],
@@ -83,6 +100,33 @@ def test_derived_values():
         ("inc_1", "staff_1", True, 0)
 
 
+def test_topics_and_competitors():
+    rows = extract.build_tables(raw_fixture())
+    # One row per sentence per topic; a topic repeated on a sentence counts once, untagged sentences none.
+    assert [(r["review_id"], r["sentence_no"], r["topic"], r["topic_group"], r["sentiment"])
+            for r in rows["review_topics"]] == [("rev_1", 1, "Wait Time", "Customer Service", "negative")]
+    # Only brands in COMPETITOR_BRANDS are kept, with their reviews; reviewer names are not loaded.
+    assert [r["brand_name"] for r in rows["brands"]] == ["KFC Kenya"]
+    assert [(r["competitor_listing_id"], r["country_code"]) for r in rows["competitor_listings"]] == [("clst_1", "KE")]
+    review = rows["competitor_reviews"][0]
+    assert len(rows["competitor_reviews"]) == 1 and "customer_name" not in review
+    assert (review["brand"], review["review_date"].isoformat()) == ("KFC Kenya", "2026-10-20")
+    assert [r["competitor_review_id"] for r in rows["competitor_review_topics"]] == ["crev_1"]
+    # Competitor branches' all-time stars come from Harlyy's analytics.
+    assert (rows["competitor_listings"][0]["google_rating"], rows["competitor_listings"][0]["google_review_count"]) == \
+        (4.25, 4)
+
+
+def test_counts_in_harlyy_follows_harlyys_incident_rule():
+    cutoff = extract.HARLYY_COUNTS_ALL_ACTIONABLE_FROM_MS
+    media = {"type": "media-document", "actionable": True}
+    assert extract.counts_in_harlyy({"type": "submission"}) and extract.counts_in_harlyy({"type": "review"})
+    assert extract.counts_in_harlyy(dict(media, createdAt=cutoff))
+    assert not extract.counts_in_harlyy(dict(media, createdAt=cutoff - 1))          # before: only if picked up
+    assert extract.counts_in_harlyy(dict(media, createdAt=cutoff - 1, reviewedAt=cutoff))
+    assert not extract.counts_in_harlyy(dict(media, actionable=False, createdAt=cutoff))
+
+
 class FakeHarlyy:
     """Stands in for the Harlyy client in fetch(): list endpoints filtered on createdAt
     / updatedAt, and comments per incident."""
@@ -101,6 +145,9 @@ class FakeHarlyy:
 
     def get(self, path, entity):
         raise AssertionError(path)
+
+    def analytics(self, kind, entity, list_key, id_key):
+        return []
 
     def comments(self, incident_id):
         self.comment_calls.append(incident_id)
@@ -183,8 +230,10 @@ def test_load_sql_covers_every_table_in_one_transaction():
     assert len(merge) <= 40  # Data API batch limit
     for t in extract.TABLES:
         assert any(f"harlyy_feedback_analytics.{t['name']} " in s for s in merge), t["name"]
-    stage = load.stage_sql(m, "harlyy_feedback_staging", "arn:aws:iam::1:role/r")
-    assert len(stage) <= 40 and sum(s.startswith("COPY") for s in stage) == len(extract.TABLES)
+    # Staging runs one STAGE_GROUPS batch at a time; each must fit the Data API batch limit.
+    stage = [load.stage_sql(m, "harlyy_feedback_staging", "arn:aws:iam::1:role/r", g) for g in load.STAGE_GROUPS]
+    assert max(len(batch) for batch in stage) <= 40
+    assert sum(s.startswith("COPY") for batch in stage for s in batch) == len(extract.TABLES)
     assert load.TABLE_ORDER == [t["name"] for t in extract.TABLES]
 
 

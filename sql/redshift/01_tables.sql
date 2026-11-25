@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.incidents (
     resolved_at TIMESTAMP,
     hours_to_review DOUBLE PRECISION,
     hours_to_resolve DOUBLE PRECISION,
+    is_actionable BOOLEAN,
+    counts_in_harlyy BOOLEAN,
     PRIMARY KEY (incident_id)
 )
 DISTSTYLE EVEN
@@ -138,6 +140,67 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.reviews (
 )
 DISTSTYLE EVEN
 SORTKEY (review_date);
+
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.review_topics (
+    review_id VARCHAR(128),
+    sentence_no INTEGER,
+    category_id VARCHAR(128),
+    topic VARCHAR(512),
+    topic_group VARCHAR(512),
+    sentiment VARCHAR(64),
+    score_positive DOUBLE PRECISION,
+    score_negative DOUBLE PRECISION,
+    score_neutral DOUBLE PRECISION,
+    sentence_offset INTEGER,
+    sentence_length INTEGER
+)
+DISTKEY (review_id)
+SORTKEY (review_id);
+
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.competitor_reviews (
+    competitor_review_id VARCHAR(128),
+    competitor_listing_id VARCHAR(128),
+    listing_name VARCHAR(512),
+    brand_id VARCHAR(128),
+    brand VARCHAR(512),
+    country_code VARCHAR(64),
+    source VARCHAR(64),
+    source_review_id VARCHAR(512),
+    source_url VARCHAR(2048),
+    rating INTEGER,
+    title VARCHAR(512),
+    content VARCHAR(65535),
+    has_reply BOOLEAN,
+    reply_content VARCHAR(65535),
+    replied_at TIMESTAMP,
+    sentiment VARCHAR(64),
+    sentiment_positive DOUBLE PRECISION,
+    sentiment_negative DOUBLE PRECISION,
+    sentiment_neutral DOUBLE PRECISION,
+    review_created_at TIMESTAMP,
+    review_date DATE,
+    updated_at TIMESTAMP,
+    synced_at TIMESTAMP,
+    PRIMARY KEY (competitor_review_id)
+)
+DISTSTYLE EVEN
+SORTKEY (review_date);
+
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.competitor_review_topics (
+    competitor_review_id VARCHAR(128),
+    sentence_no INTEGER,
+    category_id VARCHAR(128),
+    topic VARCHAR(512),
+    topic_group VARCHAR(512),
+    sentiment VARCHAR(64),
+    score_positive DOUBLE PRECISION,
+    score_negative DOUBLE PRECISION,
+    score_neutral DOUBLE PRECISION,
+    sentence_offset INTEGER,
+    sentence_length INTEGER
+)
+DISTKEY (competitor_review_id)
+SORTKEY (competitor_review_id);
 
 CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.locations (
     location_id VARCHAR(128),
@@ -250,6 +313,50 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.staff (
 DISTSTYLE ALL
 SORTKEY (staff_id);
 
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.review_categories (
+    category_id VARCHAR(128),
+    topic VARCHAR(512),
+    topic_group VARCHAR(512),
+    PRIMARY KEY (category_id)
+)
+DISTSTYLE ALL
+SORTKEY (category_id);
+
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.competitor_listings (
+    competitor_listing_id VARCHAR(128),
+    name VARCHAR(512),
+    brand_id VARCHAR(128),
+    brand VARCHAR(512),
+    country_code VARCHAR(64),
+    address VARCHAR(512),
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    source VARCHAR(64),
+    source_place_id VARCHAR(512),
+    source_url VARCHAR(2048),
+    google_rating DOUBLE PRECISION,
+    google_review_count INTEGER,
+    is_active BOOLEAN,
+    is_scraping BOOLEAN,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    synced_at TIMESTAMP,
+    PRIMARY KEY (competitor_listing_id)
+)
+DISTSTYLE ALL
+SORTKEY (competitor_listing_id);
+
+CREATE TABLE IF NOT EXISTS harlyy_feedback_analytics.brands (
+    brand_id VARCHAR(128),
+    brand_name VARCHAR(512),
+    website_url VARCHAR(2048),
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    PRIMARY KEY (brand_id)
+)
+DISTSTYLE ALL
+SORTKEY (brand_id);
+
 -- Staging: the load job's own working copies, emptied at the start of every load.
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.submissions (LIKE harlyy_feedback_analytics.submissions);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.submission_answers (LIKE harlyy_feedback_analytics.submission_answers);
@@ -257,6 +364,9 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incidents (LIKE harlyy_feedba
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incident_metrics (LIKE harlyy_feedback_analytics.incident_metrics);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.incident_comments (LIKE harlyy_feedback_analytics.incident_comments);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.reviews (LIKE harlyy_feedback_analytics.reviews);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.review_topics (LIKE harlyy_feedback_analytics.review_topics);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.competitor_reviews (LIKE harlyy_feedback_analytics.competitor_reviews);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.competitor_review_topics (LIKE harlyy_feedback_analytics.competitor_review_topics);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.locations (LIKE harlyy_feedback_analytics.locations);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.location_labels (LIKE harlyy_feedback_analytics.location_labels);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.labels (LIKE harlyy_feedback_analytics.labels);
@@ -265,4 +375,7 @@ CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.survey_steps (LIKE harlyy_fee
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.step_options (LIKE harlyy_feedback_analytics.step_options);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.metrics (LIKE harlyy_feedback_analytics.metrics);
 CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.staff (LIKE harlyy_feedback_analytics.staff);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.review_categories (LIKE harlyy_feedback_analytics.review_categories);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.competitor_listings (LIKE harlyy_feedback_analytics.competitor_listings);
+CREATE TABLE IF NOT EXISTS harlyy_feedback_staging.brands (LIKE harlyy_feedback_analytics.brands);
 

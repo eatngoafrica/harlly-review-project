@@ -21,7 +21,7 @@ JOIN (
      AND p.business_date = c.business_date AND p."hour" = c."hour";
 
 CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_incidents AS
-SELECT incident_id, code, type, is_survey_incident, status, is_open, media_document_id, media_source_id, submission_id, survey_id, location_id, customer_id, staff_id, rating, assignee_ids, reviewed_by, resolved_by, created_at, updated_at, created_date, reviewed_at, resolved_at, hours_to_review, hours_to_resolve
+SELECT incident_id, code, type, is_survey_incident, status, is_open, media_document_id, media_source_id, submission_id, survey_id, location_id, customer_id, staff_id, rating, assignee_ids, reviewed_by, resolved_by, created_at, updated_at, created_date, reviewed_at, resolved_at, hours_to_review, hours_to_resolve, is_actionable, counts_in_harlyy
 FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY incident_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
     FROM harlyy_feedback_lake.incidents
@@ -55,6 +55,34 @@ FROM (
     FROM harlyy_feedback_lake.reviews
 )
 WHERE version = 1;
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_review_topics AS
+SELECT c.review_id, c.sentence_no, c.category_id, c.topic, c.topic_group, c.sentiment, c.score_positive, c.score_negative, c.score_neutral, c.sentence_offset, c.sentence_length
+FROM harlyy_feedback_lake.review_topics c
+JOIN (
+    SELECT review_id, business_date, "hour",
+           ROW_NUMBER() OVER (PARTITION BY review_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.reviews
+) p ON p.version = 1 AND p.review_id = c.review_id
+     AND p.business_date = c.business_date AND p."hour" = c."hour";
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_competitor_reviews AS
+SELECT competitor_review_id, competitor_listing_id, listing_name, brand_id, brand, country_code, source, source_review_id, source_url, rating, title, content, has_reply, reply_content, replied_at, sentiment, sentiment_positive, sentiment_negative, sentiment_neutral, review_created_at, review_date, updated_at, synced_at
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY competitor_review_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.competitor_reviews
+)
+WHERE version = 1;
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_competitor_review_topics AS
+SELECT c.competitor_review_id, c.sentence_no, c.category_id, c.topic, c.topic_group, c.sentiment, c.score_positive, c.score_negative, c.score_neutral, c.sentence_offset, c.sentence_length
+FROM harlyy_feedback_lake.competitor_review_topics c
+JOIN (
+    SELECT competitor_review_id, business_date, "hour",
+           ROW_NUMBER() OVER (PARTITION BY competitor_review_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.competitor_reviews
+) p ON p.version = 1 AND p.competitor_review_id = c.competitor_review_id
+     AND p.business_date = c.business_date AND p."hour" = c."hour";
 
 CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_locations AS
 SELECT location_id, location_name, brand, country, state, city, region, regional_manager, order_type, other_labels, is_online, timezone, country_code, address_line1, address_line2, city_address, postcode, latitude, longitude, google_place_id, status, updated_at
@@ -121,6 +149,30 @@ SELECT staff_id, name, position, status, last_active_at
 FROM (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY staff_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
     FROM harlyy_feedback_lake.staff
+)
+WHERE version = 1;
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_review_categories AS
+SELECT category_id, topic, topic_group
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY category_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.review_categories
+)
+WHERE version = 1;
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_competitor_listings AS
+SELECT competitor_listing_id, name, brand_id, brand, country_code, address, latitude, longitude, source, source_place_id, source_url, google_rating, google_review_count, is_active, is_scraping, created_at, updated_at, synced_at
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY competitor_listing_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.competitor_listings
+)
+WHERE version = 1;
+
+CREATE OR REPLACE VIEW harlyy_feedback_lake.latest_brands AS
+SELECT brand_id, brand_name, website_url, created_at, updated_at
+FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY brand_id ORDER BY business_date DESC, CASE "hour" WHEN 'full' THEN -1 WHEN 'day' THEN 24 ELSE CAST("hour" AS INTEGER) END DESC) AS version
+    FROM harlyy_feedback_lake.brands
 )
 WHERE version = 1;
 
