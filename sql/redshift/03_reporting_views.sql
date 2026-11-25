@@ -82,6 +82,12 @@ WITH NO SCHEMA BINDING;
 --    priority for replying:
 --      1 = negative and not replied   2 = mixed / 3-star and not replied
 --      3 = positive and not replied   4 = already replied
+--      5 = old: not replied but posted more than 7 days ago. History only, do NOT
+--          contact the customer.
+--    Harlyy re-syncs old Google reviews in bulk (some from 2021-2022). They arrive
+--    in our table today but keep their real posting date in review_created_at, so
+--    age is judged by that date, never by when the row was loaded (updated_at /
+--    synced_at change on every re-sync). is_recent = posted in the last 7 days.
 --    Region and regional manager come from the review's Harlyy location. Where that is
 --    missing or has no region (all Chowdeck listings, some Google locations), they come
 --    from another Harlyy location of the same store, via 04_store_map.sql. If no Harlyy
@@ -96,7 +102,11 @@ WITH NO SCHEMA BINDING;
 --    months are 30 days). days_waiting: whole days since an unreplied review was
 --    left (blank once replied).
 -- ---------------------------------------------------------------------------------
-CREATE OR REPLACE VIEW harlyy_feedback_analytics.vw_review_actions AS
+-- Dropped first: CREATE OR REPLACE cannot change a view's columns. Re-grant SELECT on
+-- it to readers afterwards (vw_comment_responses is late-binding and needs no rebuild).
+DROP VIEW IF EXISTS harlyy_feedback_analytics.vw_review_actions;
+
+CREATE VIEW harlyy_feedback_analytics.vw_review_actions AS
 SELECT r.*,
        CASE WHEN r.minutes_to_reply IS NULL THEN NULL
             WHEN r.minutes_to_reply < 60     THEN CAST(r.minutes_to_reply AS VARCHAR) || 'm'
@@ -125,9 +135,11 @@ FROM (
            CASE WHEN NOT r.has_reply
                 THEN DATEDIFF(minute, r.review_created_at, GETDATE()) / 1440 END AS days_waiting,
            CASE WHEN r.has_reply                                     THEN 4
+                WHEN r.review_created_at < DATEADD(day, -7, GETDATE()) THEN 5
                 WHEN r.rating <= 2 OR r.sentiment = 'negative'       THEN 1
                 WHEN r.rating = 3  OR r.sentiment = 'mixed'          THEN 2
                 ELSE 3 END                                                      AS action_priority,
+           r.review_created_at >= DATEADD(day, -7, GETDATE())                   AS is_recent,
            r.brand,
            COALESCE(l.location_name, r.listing_name)                            AS store,
            r.listing_name,
@@ -168,6 +180,5 @@ WITH NO SCHEMA BINDING;
 -- SELECT action_priority, days_waiting, review_created_at, source, brand, store, region, regional_manager,
 --        rating, sentiment, LEFT(content, 200) AS content, source_url
 -- FROM harlyy_feedback_analytics.vw_review_actions
--- WHERE action_priority IN (1, 2)
---   AND review_created_at >= DATEADD(day, -7, GETDATE())
+-- WHERE action_priority IN (1, 2)          -- priority 5 (older than 7 days) is never listed
 -- ORDER BY action_priority, review_created_at;
