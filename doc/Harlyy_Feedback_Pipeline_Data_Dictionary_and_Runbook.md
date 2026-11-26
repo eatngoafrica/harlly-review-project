@@ -460,6 +460,7 @@ A run either loads completely or changes nothing, and re-running any run gives t
 | Alert or error | Cause | Fix |
 | --- | --- | --- |
 | Harlyy extract failed: HTTP 401 | Harlyy secret missing or changed | Update the SSM parameter `/harlyy-feedback/prod/harlyy-client-secret`, then re-run the hour |
+| Harlyy extract failed: HTTP 429 Rate limit exceeded | Harlyy throttled the run (most likely in a --full-history run, which fetches every incident's notes). The extract already pauses and retries for about 4 minutes before giving up | Re-run later; if it keeps happening, lower COMMENT_WORKERS in glue/harlyy_extract.py |
 | Harlyy extract failed: data quality problems | Something unexpected in Harlyy's data; the email lists it | Investigate with the raw files; fix the code or re-run once Harlyy is corrected |
 | Harlyy load failed: Table definitions do not match | A column was added in code but not in Redshift | Apply the DDL change, re-run the load with `--MANIFEST` |
 | Harlyy load failed: permission denied | Grants missing | Run `sql/redshift/02_grants.sql` |

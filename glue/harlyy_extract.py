@@ -67,6 +67,11 @@ except ImportError:
 API_BASE = "https://api.harlyy.com"
 PAGE_SIZE = 50  # API maximum
 RETRIES = 3
+# HTTP 429 "Rate limit exceeded": a full-history run hit it after ~2,170 calls (26 Nov
+# 2026, incident comments). Every thread then pauses: Harlyy's Retry-After if it sends
+# one, else 5 s doubling up to 60 s, for up to RATE_LIMIT_RETRIES attempts (~5 min).
+RATE_LIMIT_RETRIES = 8
+RATE_LIMIT_MAX_WAIT = 60
 OVERLAP_MINUTES = 10
 DEFAULT_REVIEWS_FROM = "2026-01-01"
 # Staff add comments to an incident days after it last changed (up to 3 days seen,
@@ -281,12 +286,32 @@ class Harlyy:
         self.recorder = recorder
         self.requests = 0
         self._lock = threading.Lock()  # comments are fetched from several threads
+        self._paused_until = 0.0  # rate limited: no thread calls Harlyy before this time
+
+    def _wait_if_paused(self):
+        with self._lock:
+            delay = self._paused_until - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+    def _pause(self, err, attempt):
+        """Rate limited: hold every thread for Harlyy's Retry-After, else a backoff."""
+        try:
+            wait = float(err.headers.get("Retry-After"))
+        except (TypeError, ValueError, AttributeError):
+            wait = 5 * 2 ** (attempt - 1)
+        wait = min(max(wait, 1), RATE_LIMIT_MAX_WAIT)
+        with self._lock:
+            self._paused_until = max(self._paused_until, time.time() + wait)
+        print(f"  rate limited by Harlyy: pausing {wait:.0f}s (attempt {attempt} of {RATE_LIMIT_RETRIES})")
 
     def _get_json(self, url):
-        """GET a JSON document, retrying dropped connections and server errors."""
+        """GET a JSON document, retrying dropped connections, server errors and rate limits."""
         req = urllib.request.Request(url, headers={"Accept": "application/json",
                                                    "Authorization": f"Bearer {self.token}"})
-        for attempt in range(1, RETRIES + 1):
+        failures = 0  # other than rate limits
+        for attempt in range(1, RATE_LIMIT_RETRIES + RETRIES + 1):
+            self._wait_if_paused()
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     body = resp.read()
@@ -294,15 +319,21 @@ class Harlyy:
                     self.requests += 1
                 return json.loads(body or b"null")
             except urllib.error.HTTPError as e:
+                rate_limits = attempt - failures
+                if e.code == 429 and rate_limits < RATE_LIMIT_RETRIES:
+                    self._pause(e, rate_limits)
+                    continue
+                failures += 1
                 # 403 included: Harlyy has refused a valid key for a moment (metrics,
                 # 2026-10-24 10:00 run); a key that is really revoked still fails after the retries.
-                if e.code not in (403, 429, 500, 502, 503, 504) or attempt == RETRIES:
+                if e.code not in (403, 500, 502, 503, 504) or failures == RETRIES:
                     detail = e.read().decode(errors="replace")[:500]
                     raise RuntimeError(f"GET {url.split('?')[0]} failed with HTTP {e.code}: {detail}") from None
             except OSError as e:  # connection reset, timeout, DNS
-                if attempt == RETRIES:
+                failures += 1
+                if failures == RETRIES:
                     raise RuntimeError(f"GET {url.split('?')[0]} failed: {e}") from e
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** failures)
 
     def get(self, path, entity):
         record = self._get_json(self.base + path)["data"]

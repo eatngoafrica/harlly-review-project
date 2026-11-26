@@ -450,3 +450,46 @@ def test_athena_views_file_is_up_to_date():
     assert text.splitlines() == (extract.athena_views() + "\n").splitlines()
     for t in extract.TABLES:
         assert f"VIEW harlyy_feedback_lake.latest_{t['name']} AS" in text
+
+
+def test_rate_limits_pause_every_thread_and_retry(monkeypatch):
+    import email.message
+    import urllib.error
+
+    def refusal(retry_after=None):
+        headers = email.message.Message()
+        if retry_after:
+            headers["Retry-After"] = retry_after
+        return urllib.error.HTTPError("u", 429, "Too Many Requests", headers,
+                                      io.BytesIO(b'{"errors":[{"code":"too-many-requests"}]}'))
+
+    class Answer(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    replies = [refusal("7"), refusal(), Answer(b'{"data": [1]}')]
+
+    def urlopen(req, timeout):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    clock = {"now": 1000.0}
+    slept = []
+    monkeypatch.setattr(extract.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(extract.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(extract.time, "sleep", lambda s: (slept.append(s), clock.update(now=clock["now"] + s)))
+    api = extract.Harlyy("bus_1", "token", extract.Recorder())
+    assert api._get_json("https://x/y") == {"data": [1]}
+    assert slept == [7, 10]  # Harlyy's Retry-After, then the backoff for the 2nd refusal
+
+    replies[:] = [refusal() for _ in range(extract.RATE_LIMIT_RETRIES)]
+    try:
+        api._get_json("https://x/y")
+        raise AssertionError("should give up")
+    except RuntimeError as err:
+        assert "HTTP 429" in str(err) and not replies
