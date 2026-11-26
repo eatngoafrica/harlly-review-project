@@ -3,15 +3,21 @@
 -- (terraform apply): from then on every load writes these tables and columns, and a load
 -- that finds them missing fails with "Table definitions do not match".
 -- Same definitions as sql/redshift/01_tables.sql (generated from glue/harlyy_extract.py).
--- Safe to re-run except step 1 (ADD COLUMN fails if the column already exists).
+-- Safe to re-run except the two ADD COLUMN lines (they fail if the column already exists).
 --
--- After deploying, run the extract once with --full-history true (Glue job, Run with
--- parameters): it fills the new tables with history since 1 Jan 2026 and sets the new
--- incident columns on existing incidents. Until then they are empty / NULL.
+-- After deploying, run the extract once with --since 2026-09-01 (Glue job, Run with
+-- parameters): it re-reads everything changed since then, filling the new tables
+-- (competitors from Sep 2026) and the incident columns of incidents changed since.
 
 -- 1. New incident columns (added at the end, as in TABLES).
 ALTER TABLE harlyy_feedback_analytics.incidents ADD COLUMN is_actionable BOOLEAN;
 ALTER TABLE harlyy_feedback_analytics.incidents ADD COLUMN counts_in_harlyy BOOLEAN;
+-- Incidents already loaded: survey and review incidents always count in Harlyy's total.
+-- (Photo / document incidents are set by the next extract that reads them; a catch-up
+-- run from 1 Sep re-reads everything changed since then.)
+UPDATE harlyy_feedback_analytics.incidents
+SET counts_in_harlyy = type IN ('submission', 'review')
+WHERE counts_in_harlyy IS NULL;
 -- Staging copy: rebuilt from the target (the load empties it every run anyway).
 DROP TABLE IF EXISTS harlyy_feedback_staging.incidents;
 CREATE TABLE harlyy_feedback_staging.incidents (LIKE harlyy_feedback_analytics.incidents);

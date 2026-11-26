@@ -30,6 +30,8 @@ Job parameters (Glue passes them as --NAME value):
 One-off runs (the next scheduled run is hourly again):
     --full-history true    everything changed before the start of the current hour
     --reviews-from DATE    with --full-history: reviews from this date or year (2023 / 2023-06-01)
+    --since YYYY-MM-DD     everything changed from that day (Lagos) to the start of the current
+                           hour: a catch-up that is much lighter than --full-history
     --hour YYYY-MM-DDTHH   one hour, e.g. a missed run
     --date YYYY-MM-DD      one whole day as a single run
     --from-raw true        rebuild Parquet from the run's raw files; no API calls
@@ -1017,6 +1019,9 @@ def partition_of(run):
     m = re.fullmatch(r"full_history=(\d{4}-\d{2}-\d{2})T\d{2}", run)
     if m:
         return m.group(1), "full"
+    m = re.fullmatch(r"since=\d{4}-\d{2}-\d{2}/to=(\d{4}-\d{2}-\d{2})T\d{2}", run)
+    if m:
+        return m.group(1), "full"
     raise ValueError(f"not a run or partition folder: {run!r}")
 
 
@@ -1201,6 +1206,10 @@ def plan_run(args, now=None):
     if args.full_history:
         return (f"full_history={this_hour:%Y-%m-%dT%H}", None, ms(this_hour),
                 f"FULL HISTORY: everything changed before {this_hour:%Y-%m-%d %H:00} Lagos")
+    if args.since:
+        since = datetime.combine(date.fromisoformat(args.since), datetime.min.time(), tzinfo=LAGOS)
+        return (f"since={since:%Y-%m-%d}/to={this_hour:%Y-%m-%dT%H}", ms(since), ms(this_hour),
+                f"CATCH-UP: everything changed from {since:%Y-%m-%d} to {this_hour:%Y-%m-%d %H:00} Lagos")
     if args.date:
         day = datetime.combine(date.fromisoformat(args.date), datetime.min.time(), tzinfo=LAGOS)
         return (f"business_date={day:%Y-%m-%d}", ms(day), ms(day + timedelta(days=1)),
@@ -1262,6 +1271,7 @@ def parse_args(argv):
     p.add_argument("--reviews-from", dest="reviews_from")
     p.add_argument("--hour", help="YYYY-MM-DDTHH (Lagos)")
     p.add_argument("--date", help="YYYY-MM-DD (Lagos), the whole day as one run")
+    p.add_argument("--since", help="YYYY-MM-DD (Lagos): everything changed from that day to this hour")
     p.add_argument("--from-raw", dest="from_raw", nargs="?", const="true", default="false", type=true_or_false)
     p.add_argument("--local-dir", dest="local_dir", help="local test: write here instead of S3, publish nothing")
     p.add_argument("--catalog-backfill", dest="catalog_backfill", nargs="?", const="true", default="false",
@@ -1273,8 +1283,8 @@ def parse_args(argv):
     if args.S3_BUCKET:
         args.S3_BUCKET = args.S3_BUCKET.strip().replace("s3://", "").strip("/")
     args.S3_PREFIX = args.S3_PREFIX.strip().strip("/")
-    if sum(bool(x) for x in (args.full_history, args.hour, args.date)) > 1:
-        p.error("use only one of --full-history, --hour, --date")
+    if sum(bool(x) for x in (args.full_history, args.hour, args.date, args.since)) > 1:
+        p.error("use only one of --full-history, --hour, --date, --since")
     return args
 
 
@@ -1370,6 +1380,8 @@ def rerun_hint(run):
         return f"Glue job, Run with parameters: --hour {day}T{hour}. Later hourly runs do not cover this hour."
     if run.startswith("business_date="):
         return f"Glue job, Run with parameters: --date {run[len('business_date='):]}"
+    if run.startswith("since="):
+        return f"Glue job, Run with parameters: --since {run[len('since='):len('since=') + 10]}"
     return "Glue job, Run with parameters: --full-history true"
 
 

@@ -448,6 +448,7 @@ A run either loads completely or changes nothing, and re-running any run gives t
 | `--hour 2026-10-21T09` | One hour (Lagos), e.g. a missed run |
 | `--date 2026-10-20` | One whole day as a single run |
 | `--reviews-from 2025` | With `--full-history`: reviews from that year or date. Not needed otherwise: hourly runs keep every review Harlyy re-syncs, whatever its age |
+| `--since YYYY-MM-DD` | Everything changed from that day (Lagos) to the start of the current hour, as one run: a catch-up much lighter than `--full-history` (used 26 Nov 2026 with 2026-09-01 after adding competitors and topics) |
 | `--from-raw true` | Rebuild the Parquet from that run's saved raw files, without calling Harlyy. Runs saved before 16 Nov 2026 have no raw incident comments and are refused (rebuilding them would empty those incidents' notes); re-run them with `--hour` / `--date` instead |
 | `--catalog-backfill true` | Register every Parquet folder already on S3 in the Athena catalog, then stop. No Harlyy calls, no Redshift load; safe to repeat. Run once after the catalog is first deployed, or after a catalog warning email |
 

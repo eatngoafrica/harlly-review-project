@@ -212,6 +212,12 @@ def test_run_windows():
     assert (run, start) == ("full_history=2026-10-21T10", None)
     assert end == extract.ms(now.replace(minute=0))  # stops where the next hourly run starts
     assert extract.parse_reviews_from("2023").isoformat() == "2023-01-01"
+    # Catch-up: everything changed from a day to the start of this hour (stored like a full history).
+    run, start, end, _ = extract.plan_run(extract.parse_args(["--since", "2026-09-01"]), now)
+    assert run == "since=2026-09-01/to=2026-10-21T10"
+    assert start == extract.ms(datetime(2026, 9, 1, tzinfo=extract.LAGOS)) and end == extract.ms(now.replace(minute=0))
+    assert extract.partition_of(run) == ("2026-10-21", "full")
+    assert extract.rerun_hint(run) == "Glue job, Run with parameters: --since 2026-09-01"
 
 
 def manifest(names):
