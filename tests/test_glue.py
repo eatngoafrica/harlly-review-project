@@ -254,7 +254,13 @@ def test_child_rows_replaced_even_without_child_file():
 
 def test_staging_checks_and_transient_errors():
     sql = load.staging_checks_sql(manifest({"submissions", "submission_answers"}), "st")
-    assert "COUNT(DISTINCT COALESCE(submission_id, ''))" in sql and "SELECT DISTINCT" in sql
+    assert "COUNT(DISTINCT COALESCE(CAST(submission_id AS VARCHAR), ''))" in sql and "SELECT DISTINCT" in sql
+    # Identifying columns that are numbers are compared as text (Redshift rejects COALESCE(int, '')).
+    sql = load.staging_checks_sql(manifest({"review_topics"}), "st")
+    assert "COALESCE(CAST(sentence_no AS VARCHAR), '')" in sql
+    numeric = {n for t in extract.TABLES for n, c in t["columns"] if c in ("int", "bigint", "float", "bool", "ts", "date")}
+    every = load.staging_checks_sql(manifest({t["name"] for t in extract.TABLES}), "st")
+    assert not any(f"COALESCE({n}, '')" in every for n in numeric)
     assert load.is_transient("ERROR: 1023 DETAIL: Serializable isolation violation")
     assert not load.is_transient("column \"x\" does not exist")
 
