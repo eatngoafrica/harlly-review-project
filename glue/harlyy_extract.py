@@ -30,6 +30,8 @@ Job parameters (Glue passes them as --NAME value):
 One-off runs (the next scheduled run is hourly again):
     --full-history true    everything changed before the start of the current hour
     --reviews-from DATE    with --full-history: reviews from this date or year (2023 / 2023-06-01)
+    --since YYYY-MM-DD     everything changed from that day (Lagos) to the start of the current
+                           hour: a catch-up that is much lighter than --full-history
     --hour YYYY-MM-DDTHH   one hour, e.g. a missed run
     --date YYYY-MM-DD      one whole day as a single run
     --from-raw true        rebuild Parquet from the run's raw files; no API calls
@@ -67,6 +69,11 @@ except ImportError:
 API_BASE = "https://api.harlyy.com"
 PAGE_SIZE = 50  # API maximum
 RETRIES = 3
+# HTTP 429 "Rate limit exceeded": a full-history run hit it after ~2,170 calls (26 Nov
+# 2026, incident comments). Every thread then pauses: Harlyy's Retry-After if it sends
+# one, else 5 s doubling up to 60 s, for up to RATE_LIMIT_RETRIES attempts (~5 min).
+RATE_LIMIT_RETRIES = 8
+RATE_LIMIT_MAX_WAIT = 60
 OVERLAP_MINUTES = 10
 DEFAULT_REVIEWS_FROM = "2026-01-01"
 # Staff add comments to an incident days after it last changed (up to 3 days seen,
@@ -93,6 +100,33 @@ NEGATIVE_MAX_RATING = 3  # ratings at or below this show a step's negativeTitle
 # are 1 point above Harlyy, on scores that land exactly on a whole number.
 SMILE_WEIGHTS = {1: (20, 0), 2: (2, 0.5), 3: (2, 1), 4: (3, 2.25), 5: (3, 3)}
 
+# Which incidents Harlyy's Total Incidents counts (counts_in_harlyy). Found by testing its
+# analytics one incident at a time (Nov 2026): every survey and review incident, and
+# media-document incidents marked actionable - all of them from the night of 21 Nov
+# 2026 (when Harlyy added review incidents), before that only the ones picked up.
+HARLYY_COUNTS_ALL_ACTIONABLE_FROM_MS = 1795297080000  # 2026-11-21 21:38 UTC, first review incident
+
+
+def counts_in_harlyy(inc):
+    if inc.get("type") in ("submission", "review"):
+        return True
+    return bool(inc.get("type") == "media-document" and inc.get("actionable")
+                and (inc.get("reviewedAt") or (inc.get("createdAt") or 0) >= HARLYY_COUNTS_ALL_ACTIONABLE_FROM_MS))
+
+
+# Competitors loaded: Harlyy brand names (any case), Nigeria and Kenya. Harlyy tracks
+# about 30 brands; only these branches and their reviews are kept. Add or remove names
+# here; a brand added later fills in from the next --full-history run.
+COMPETITOR_BRANDS = {b.lower() for b in (
+    # Nigeria
+    "Chicken Republic", "KFC Nigeria", "Mega Chicken", "Burger King Nigeria", "Kilimanjaro",
+    "Sweet Sensation", "Pizza Hut Nigeria", "Debonairs Pizza", "Panarottis", "Krispy Kreme Nigeria",
+    "Scoop'd", "Hans & Rene", "King Lace",
+    # Kenya ("KFC" is a second Harlyy brand for KFC Kenya branches)
+    "KFC Kenya", "KFC", "Pizza Hut Kenya", "Pizza Inn", "Jajemelo Pizza", "Papa Johns Kenya",
+    "Debonairs Pizza Kenya", "Non Solo Gelato", "Creamy Inn",
+)}
+
 
 # ---------- tables -------------------------------------------------------------------
 # Every table is defined once here: the Parquet files, the Redshift DDL and the
@@ -106,6 +140,12 @@ MAX_TEXT_BYTES = {"id": 128, "short": 64, "name": 512, "list": 4096, "url": 2048
 
 def _cols(spec):
     return [tuple(p.strip().split(":")) for p in spec.split(",") if p.strip()]
+
+
+# Shared by review_topics and competitor_review_topics ({id}: the review's ID column).
+TOPIC_COLUMNS = """
+    {id}:id, sentence_no:int, category_id:id, topic:name, topic_group:name, sentiment:short,
+    score_positive:float, score_negative:float, score_neutral:float, sentence_offset:int, sentence_length:int"""
 
 
 # name, columns, key (upsert) or None, parent (table, column) for child tables,
@@ -131,7 +171,7 @@ TABLES = [
         media_document_id:id, media_source_id:id, submission_id:id, survey_id:id, location_id:id,
         customer_id:id, staff_id:id, rating:int, assignee_ids:list, reviewed_by:id, resolved_by:id,
         created_at:ts, updated_at:ts, created_date:date, reviewed_at:ts, resolved_at:ts,
-        hours_to_review:float, hours_to_resolve:float"""),
+        hours_to_review:float, hours_to_resolve:float, is_actionable:bool, counts_in_harlyy:bool"""),
          key="incident_id", parent=None, unique=["incident_id"],
          # Not on submission_id: media-document incidents have none and would pile onto one slice.
          dist="DISTSTYLE EVEN", sort="SORTKEY (created_date)"),
@@ -155,6 +195,24 @@ TABLES = [
         sentiment_neutral:float, status:short, review_created_at:ts, review_date:date,
         updated_at:ts, synced_at:ts, received_at:ts, alert_sent:bool"""),
          key="review_id", parent=None, unique=["review_id"], dist="DISTSTYLE EVEN", sort="SORTKEY (review_date)"),
+    # Topics customers mention: one row per sentence per Harlyy category (topic) it is
+    # tagged with, and that sentence's sentiment. Sentences with no topic are left out.
+    dict(name="review_topics", columns=_cols(TOPIC_COLUMNS.replace("{id}", "review_id")),
+         key=None, parent=("reviews", "review_id"), unique=["review_id", "sentence_no", "category_id"],
+         dist="DISTKEY (review_id)", sort="SORTKEY (review_id)"),
+    # Competitors' Google reviews (Harlyy's competitor tracking). Reviewer names are left out.
+    dict(name="competitor_reviews", columns=_cols("""
+        competitor_review_id:id, competitor_listing_id:id, listing_name:name, brand_id:id, brand:name,
+        country_code:short, source:short, source_review_id:name, source_url:url, rating:int, title:name,
+        content:text, has_reply:bool, reply_content:text, replied_at:ts, sentiment:short,
+        sentiment_positive:float, sentiment_negative:float, sentiment_neutral:float,
+        review_created_at:ts, review_date:date, updated_at:ts, synced_at:ts"""),
+         key="competitor_review_id", parent=None, unique=["competitor_review_id"],
+         dist="DISTSTYLE EVEN", sort="SORTKEY (review_date)"),
+    dict(name="competitor_review_topics", columns=_cols(TOPIC_COLUMNS.replace("{id}", "competitor_review_id")),
+         key=None, parent=("competitor_reviews", "competitor_review_id"),
+         unique=["competitor_review_id", "sentence_no", "category_id"],
+         dist="DISTKEY (competitor_review_id)", sort="SORTKEY (competitor_review_id)"),
     dict(name="locations", columns=_cols("""
         location_id:id, location_name:name, brand:name, country:name, state:name, city:name,
         region:name, regional_manager:name, order_type:name, other_labels:list, is_online:bool,
@@ -185,8 +243,22 @@ TABLES = [
          key="metric_id", parent=None, unique=["metric_id"], dist="DISTSTYLE ALL", sort="SORTKEY (metric_id)"),
     dict(name="staff", columns=_cols("staff_id:id, name:name, position:name, status:short, last_active_at:ts"),
          key="staff_id", parent=None, unique=["staff_id"], dist="DISTSTYLE ALL", sort="SORTKEY (staff_id)"),
+    # Harlyy's review topics (e.g. Wait Time) and the group each belongs to (Customer
+    # Service, Food & Beverage, Ambiance, Delivery Experience).
+    dict(name="review_categories", columns=_cols("category_id:id, topic:name, topic_group:name"),
+         key="category_id", parent=None, unique=["category_id"], dist="DISTSTYLE ALL", sort="SORTKEY (category_id)"),
+    dict(name="competitor_listings", columns=_cols("""
+        competitor_listing_id:id, name:name, brand_id:id, brand:name, country_code:short, address:name,
+        latitude:float, longitude:float, source:short, source_place_id:name, source_url:url,
+        google_rating:float, google_review_count:int, is_active:bool, is_scraping:bool,
+        created_at:ts, updated_at:ts, synced_at:ts"""),
+         key="competitor_listing_id", parent=None, unique=["competitor_listing_id"],
+         dist="DISTSTYLE ALL", sort="SORTKEY (competitor_listing_id)"),
+    dict(name="brands", columns=_cols("brand_id:id, brand_name:name, website_url:url, created_at:ts, updated_at:ts"),
+         key="brand_id", parent=None, unique=["brand_id"], dist="DISTSTYLE ALL", sort="SORTKEY (brand_id)"),
 ]
-FACT_TABLES = ("submissions", "submission_answers", "incidents", "incident_metrics", "incident_comments", "reviews")
+FACT_TABLES = ("submissions", "submission_answers", "incidents", "incident_metrics", "incident_comments", "reviews",
+               "review_topics", "competitor_reviews", "competitor_review_topics")
 
 
 def column_names(table):
@@ -216,12 +288,32 @@ class Harlyy:
         self.recorder = recorder
         self.requests = 0
         self._lock = threading.Lock()  # comments are fetched from several threads
+        self._paused_until = 0.0  # rate limited: no thread calls Harlyy before this time
+
+    def _wait_if_paused(self):
+        with self._lock:
+            delay = self._paused_until - time.time()
+        if delay > 0:
+            time.sleep(delay)
+
+    def _pause(self, err, attempt):
+        """Rate limited: hold every thread for Harlyy's Retry-After, else a backoff."""
+        try:
+            wait = float(err.headers.get("Retry-After"))
+        except (TypeError, ValueError, AttributeError):
+            wait = 5 * 2 ** (attempt - 1)
+        wait = min(max(wait, 1), RATE_LIMIT_MAX_WAIT)
+        with self._lock:
+            self._paused_until = max(self._paused_until, time.time() + wait)
+        print(f"  rate limited by Harlyy: pausing {wait:.0f}s (attempt {attempt} of {RATE_LIMIT_RETRIES})")
 
     def _get_json(self, url):
-        """GET a JSON document, retrying dropped connections and server errors."""
+        """GET a JSON document, retrying dropped connections, server errors and rate limits."""
         req = urllib.request.Request(url, headers={"Accept": "application/json",
                                                    "Authorization": f"Bearer {self.token}"})
-        for attempt in range(1, RETRIES + 1):
+        failures = 0  # other than rate limits
+        for attempt in range(1, RATE_LIMIT_RETRIES + RETRIES + 1):
+            self._wait_if_paused()
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     body = resp.read()
@@ -229,15 +321,21 @@ class Harlyy:
                     self.requests += 1
                 return json.loads(body or b"null")
             except urllib.error.HTTPError as e:
+                rate_limits = attempt - failures
+                if e.code == 429 and rate_limits < RATE_LIMIT_RETRIES:
+                    self._pause(e, rate_limits)
+                    continue
+                failures += 1
                 # 403 included: Harlyy has refused a valid key for a moment (metrics,
                 # 2026-10-24 10:00 run); a key that is really revoked still fails after the retries.
-                if e.code not in (403, 429, 500, 502, 503, 504) or attempt == RETRIES:
+                if e.code not in (403, 500, 502, 503, 504) or failures == RETRIES:
                     detail = e.read().decode(errors="replace")[:500]
                     raise RuntimeError(f"GET {url.split('?')[0]} failed with HTTP {e.code}: {detail}") from None
             except OSError as e:  # connection reset, timeout, DNS
-                if attempt == RETRIES:
+                failures += 1
+                if failures == RETRIES:
                     raise RuntimeError(f"GET {url.split('?')[0]} failed: {e}") from e
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** failures)
 
     def get(self, path, entity):
         record = self._get_json(self.base + path)["data"]
@@ -259,6 +357,23 @@ class Harlyy:
                 print(f"  {path}: {len(items)} records")
                 return list(items.values())
             page += 1
+
+    def analytics(self, kind, entity, list_key, id_key):
+        """Per-listing entries of /analytics/<kind> for the last 30 days, recorded under
+        entity with the listing ID as id. Only the all-time figures are used from them."""
+        end = int(time.time() * 1000)
+        query = urllib.parse.urlencode({"periodStart": end - 30 * 86_400_000, "periodEnd": end})
+        data = self._get_json(f"{self.base}/analytics/{kind}?{query}")["data"]
+        records = [dict(e, id=e[id_key], compiledAt=data.get("compiledAt"))
+                   for e in data["analytics"].get(list_key) or [] if e.get(id_key)]
+        self.recorder.add(entity, records)
+        return records
+
+    def category(self, category_id):
+        """One review topic. Categories are shared by every business, so not under /businesses."""
+        record = self._get_json(f"{API_BASE}/v2/review-categories/{category_id}")["data"]
+        self.recorder.add("review_categories", [record])
+        return record
 
     def comments(self, incident_id):
         """Every comment on one incident. Not recorded here (runs in worker threads)."""
@@ -305,13 +420,25 @@ def fetch(api, filters, reviews_from_ms=None, start_ms=None, end_ms=None):
         "submissions": api.list("/submissions", "submissions", filters),
         "incidents": api.list("/incidents", "incidents", filters),
         "reviews": api.list("/reviews", "reviews", review_filters),
+        "competitor_reviews": api.list("/competitor-reviews", "competitor_reviews", review_filters),
         # Lookups are small; taken whole every run.
         "locations": api.list("/locations", "locations"),
         "labels": api.list("/labels", "labels"),
         "metrics": api.list("/metrics", "metrics"),
         "staff": api.list("/staff", "staff"),
         "listings": api.list("/listings", "listings"),
+        "competitor_listings": api.list("/competitor-listings", "competitor_listings"),
+        "brands": api.list("/brands", "brands"),
+        # Competitor branches' all-time stars: only in Harlyy's analytics.
+        "competitor_listing_ratings": api.analytics("competitors", "competitor_listing_ratings",
+                                                    "competitorListings", "competitorListing"),
     }
+    # Topic names for the topics this run's reviews mention (one call each).
+    kept = tracked_competitor_listings(raw)
+    reviews = raw["reviews"] + [r for r in raw["competitor_reviews"] if r.get("competitorListing") in kept]
+    category_ids = sorted({c for r in reviews for s in (r.get("sentiment") or {}).get("sentences") or []
+                           for c in s.get("categories") or []})
+    raw["review_categories"] = [api.category(cid) for cid in category_ids]
     # Comments of every incident in the run: the load replaces them per incident.
     incidents = {inc["id"]: inc for inc in raw["incidents"]}
     comments = comments_for(api, list(incidents.values()))
@@ -402,6 +529,38 @@ def country_from_coordinates(coords):
     if latitude is None:
         return None
     return "NG" if latitude > 0 else "KE"
+
+
+def tracked_competitor_listings(raw):
+    """{competitor listing ID: listing} for the brands in COMPETITOR_BRANDS."""
+    brand_name = {b["id"]: (b.get("name") or "").strip().lower() for b in raw.get("brands") or []}
+    return {lst["id"]: lst for lst in raw.get("competitor_listings") or []
+            if brand_name.get(lst.get("brand")) in COMPETITOR_BRANDS}
+
+
+def competitor_country(listing):
+    """From the Google address; a few have none, so fall back on the hemisphere."""
+    address = listing.get("formattedAddress") or ""
+    if address.endswith("Kenya"):
+        return "KE"
+    if address.endswith("Nigeria"):
+        return "NG"
+    return country_from_coordinates(listing.get("coordinates"))
+
+
+def topic_rows(id_column, review, categories):
+    """review_topics / competitor_review_topics rows: one per sentence per topic."""
+    rows = []
+    for n, s in enumerate((review.get("sentiment") or {}).get("sentences") or [], 1):
+        scores = s.get("confidenceScore") or {}
+        for cid in dict.fromkeys(s.get("categories") or []):
+            cat = categories.get(cid) or {}
+            rows.append({id_column: review["id"], "sentence_no": n, "category_id": cid,
+                         "topic": cat.get("name"), "topic_group": cat.get("type"), "sentiment": s.get("sentiment"),
+                         "score_positive": scores.get("positive"), "score_negative": scores.get("negative"),
+                         "score_neutral": scores.get("neutral"), "sentence_offset": s.get("offset"),
+                         "sentence_length": s.get("length")})
+    return rows
 
 
 def build_tables(raw):
@@ -560,6 +719,7 @@ def build_tables(raw):
             "reviewed_at": utc(inc.get("reviewedAt")), "resolved_at": utc(inc.get("resolvedAt")),
             "hours_to_review": hours_between(inc["createdAt"], inc.get("reviewedAt")),
             "hours_to_resolve": hours_between(inc["createdAt"], inc.get("resolvedAt")),
+            "is_actionable": inc.get("actionable"), "counts_in_harlyy": counts_in_harlyy(inc),
         })
         t["incident_metrics"] += [{"incident_id": inc["id"], "metric_id": mid, "metric_name": metric_name.get(mid)}
                                   for mid in dict.fromkeys(inc.get("metrics") or [])]
@@ -599,7 +759,64 @@ def build_tables(raw):
             "updated_at": utc(rev.get("updatedAt")), "synced_at": utc(directory.get("syncedAt")),
             "received_at": utc(rev.get("receivedAt")), "alert_sent": rev.get("alertSent"),
         })
-    return t
+
+    categories = {c["id"]: c for c in raw.get("review_categories") or []}
+    t["review_topics"] = [row for rev in raw["reviews"] for row in topic_rows("review_id", rev, categories)]
+    t["review_categories"] = [{"category_id": c["id"], "topic": c.get("name"), "topic_group": c.get("type")}
+                              for c in categories.values()]
+
+    # Competitors: only the brands in COMPETITOR_BRANDS.
+    brands = {b["id"]: b for b in raw.get("brands") or []}
+    tracked = tracked_competitor_listings(raw)
+    competitor_ratings = {e["id"]: e for e in raw.get("competitor_listing_ratings") or []}
+    t["brands"] = [{"brand_id": b["id"], "brand_name": b.get("name"), "website_url": b.get("websiteUrl"),
+                    "created_at": utc(b.get("createdAt")), "updated_at": utc(b.get("updatedAt"))}
+                   for b in brands.values() if (b.get("name") or "").strip().lower() in COMPETITOR_BRANDS]
+    t["competitor_listings"] = []
+    for lst in tracked.values():
+        directory, coords = lst.get("directory") or {}, lst.get("coordinates") or {}
+        t["competitor_listings"].append({
+            "competitor_listing_id": lst["id"], "name": lst.get("name"), "brand_id": lst.get("brand"),
+            "brand": (brands.get(lst.get("brand")) or {}).get("name"), "country_code": competitor_country(lst),
+            "address": lst.get("formattedAddress"), "latitude": coords.get("latitude"),
+            "longitude": coords.get("longitude"), "source": directory.get("type"),
+            "source_place_id": directory.get("resourceId"), "source_url": directory.get("url"),
+            # Harlyy's own fields are mostly blank; its analytics has the all-time figures.
+            "google_rating": lst.get("rating") or (competitor_ratings.get(lst["id"]) or {}).get("rating"),
+            "google_review_count": lst.get("reviewCount") or sum(
+                ((competitor_ratings.get(lst["id"]) or {}).get("ratingsToDate") or {}).values()) or None,
+            "is_active": lst.get("active"), "is_scraping": lst.get("scraping"),
+            "created_at": utc(lst.get("createdAt")), "updated_at": utc(lst.get("updatedAt")),
+            "synced_at": utc(directory.get("syncedAt")),
+        })
+    listing_rows = {r["competitor_listing_id"]: r for r in t["competitor_listings"]}
+    t["competitor_reviews"], t["competitor_review_topics"] = [], []
+    for rev in raw.get("competitor_reviews") or []:
+        lst = listing_rows.get(rev.get("competitorListing"))
+        if not lst:
+            continue
+        directory = rev.get("directory") or {}
+        reply = rev.get("reply") or {}
+        sentiment = rev.get("sentiment") or {}
+        scores = sentiment.get("confidenceScore") or {}
+        t["competitor_reviews"].append({
+            "competitor_review_id": rev["id"], "competitor_listing_id": lst["competitor_listing_id"],
+            "listing_name": lst["name"], "brand_id": lst["brand_id"], "brand": lst["brand"],
+            "country_code": lst["country_code"], "source": directory.get("type"),
+            "source_review_id": directory.get("resourceId"), "source_url": directory.get("url"),
+            "rating": rev.get("rating"), "title": rev.get("subject"), "content": rev.get("content"),
+            "has_reply": bool(reply.get("content")), "reply_content": reply.get("content"),
+            "replied_at": utc(reply.get("repliedAt")), "sentiment": sentiment.get("sentiment"),
+            "sentiment_positive": scores.get("positive"), "sentiment_negative": scores.get("negative"),
+            "sentiment_neutral": scores.get("neutral"), "review_created_at": utc(rev.get("createdAt")),
+            "review_date": local(rev["createdAt"], lst["country_code"] or DEFAULT_COUNTRY).date()
+                           if rev.get("createdAt") else None,
+            "updated_at": utc(rev.get("updatedAt")), "synced_at": utc(directory.get("syncedAt")),
+        })
+        t["competitor_review_topics"] += topic_rows("competitor_review_id", rev, categories)
+
+    # Same order as TABLES (the load and the quality checks go table by table).
+    return {tbl["name"]: t[tbl["name"]] for tbl in TABLES}
 
 
 # ---------- data quality -------------------------------------------------------------------
@@ -641,6 +858,10 @@ def check_quality(rows, raw):
     unknown = sum(1 for r in rows["reviews"] if r["listing_id"] and r["listing_id"] not in listing_ids)
     if unknown:
         warnings.append(f"reviews: {unknown} rows for listings not in the listing list")
+    for name in ("review_topics", "competitor_review_topics"):
+        unknown = sum(1 for r in rows[name] if not r["topic"])
+        if unknown:
+            warnings.append(f"{name}: {unknown} rows for topics Harlyy returned no name for")
     unknown = sum(1 for r in rows["submission_answers"] if not r["step_type"])
     if unknown:
         warnings.append(f"submission_answers: {unknown} answers to steps Harlyy no longer returns")
@@ -650,7 +871,11 @@ def check_quality(rows, raw):
 # ---------- storage ------------------------------------------------------------------------
 
 RAW_ENTITIES = ("submissions", "incidents", "reviews", "locations", "labels", "metrics", "staff",
-                "listings", "surveys", "steps", "incident_comments")
+                "listings", "surveys", "steps", "incident_comments", "competitor_reviews",
+                "competitor_listings", "brands", "review_categories", "competitor_listing_ratings")
+# Added 25 Nov 2026: runs saved before then have no such files and rebuild without them.
+OPTIONAL_RAW = ("competitor_reviews", "competitor_listings", "brands", "review_categories",
+                "competitor_listing_ratings")
 
 
 class Recorder:
@@ -721,6 +946,9 @@ class Storage:
             try:
                 body = self.get(key)
             except Exception as err:
+                if entity in OPTIONAL_RAW:
+                    raw[entity] = []
+                    continue
                 # Runs saved before comments were loaded: rebuilding one would empty the
                 # comments of its incidents, so stop instead.
                 if entity == "incident_comments":
@@ -789,6 +1017,9 @@ def partition_of(run):
     if m:
         return m.group(1), m.group(2) or "day"
     m = re.fullmatch(r"full_history=(\d{4}-\d{2}-\d{2})T\d{2}", run)
+    if m:
+        return m.group(1), "full"
+    m = re.fullmatch(r"since=\d{4}-\d{2}-\d{2}/to=(\d{4}-\d{2}-\d{2})T\d{2}", run)
     if m:
         return m.group(1), "full"
     raise ValueError(f"not a run or partition folder: {run!r}")
@@ -975,6 +1206,10 @@ def plan_run(args, now=None):
     if args.full_history:
         return (f"full_history={this_hour:%Y-%m-%dT%H}", None, ms(this_hour),
                 f"FULL HISTORY: everything changed before {this_hour:%Y-%m-%d %H:00} Lagos")
+    if args.since:
+        since = datetime.combine(date.fromisoformat(args.since), datetime.min.time(), tzinfo=LAGOS)
+        return (f"since={since:%Y-%m-%d}/to={this_hour:%Y-%m-%dT%H}", ms(since), ms(this_hour),
+                f"CATCH-UP: everything changed from {since:%Y-%m-%d} to {this_hour:%Y-%m-%d %H:00} Lagos")
     if args.date:
         day = datetime.combine(date.fromisoformat(args.date), datetime.min.time(), tzinfo=LAGOS)
         return (f"business_date={day:%Y-%m-%d}", ms(day), ms(day + timedelta(days=1)),
@@ -1036,6 +1271,7 @@ def parse_args(argv):
     p.add_argument("--reviews-from", dest="reviews_from")
     p.add_argument("--hour", help="YYYY-MM-DDTHH (Lagos)")
     p.add_argument("--date", help="YYYY-MM-DD (Lagos), the whole day as one run")
+    p.add_argument("--since", help="YYYY-MM-DD (Lagos): everything changed from that day to this hour")
     p.add_argument("--from-raw", dest="from_raw", nargs="?", const="true", default="false", type=true_or_false)
     p.add_argument("--local-dir", dest="local_dir", help="local test: write here instead of S3, publish nothing")
     p.add_argument("--catalog-backfill", dest="catalog_backfill", nargs="?", const="true", default="false",
@@ -1047,8 +1283,8 @@ def parse_args(argv):
     if args.S3_BUCKET:
         args.S3_BUCKET = args.S3_BUCKET.strip().replace("s3://", "").strip("/")
     args.S3_PREFIX = args.S3_PREFIX.strip().strip("/")
-    if sum(bool(x) for x in (args.full_history, args.hour, args.date)) > 1:
-        p.error("use only one of --full-history, --hour, --date")
+    if sum(bool(x) for x in (args.full_history, args.hour, args.date, args.since)) > 1:
+        p.error("use only one of --full-history, --hour, --date, --since")
     return args
 
 
@@ -1144,6 +1380,8 @@ def rerun_hint(run):
         return f"Glue job, Run with parameters: --hour {day}T{hour}. Later hourly runs do not cover this hour."
     if run.startswith("business_date="):
         return f"Glue job, Run with parameters: --date {run[len('business_date='):]}"
+    if run.startswith("since="):
+        return f"Glue job, Run with parameters: --since {run[len('since='):len('since=') + 10]}"
     return "Glue job, Run with parameters: --full-history true"
 
 

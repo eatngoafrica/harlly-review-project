@@ -68,7 +68,8 @@ def pipeline_figures(rows, start_utc, end_utc):
             lagos_day = (s["created_at"] + timedelta(hours=1)).date()
             per_day[(s["location_id"], lagos_day)].add(s["customer_id"])
     durations = [s["duration_ms"] for s in subs if s["duration_ms"] is not None]
-    incs = [i for i in rows["incidents"] if i["is_survey_incident"]]
+    # Harlyy's Total Incidents: see counts_in_harlyy() in glue/harlyy_extract.py.
+    incs = [i for i in rows["incidents"] if i["counts_in_harlyy"]]
     revs = [r for r in rows["reviews"] if r["status"] == "active"
             and r["review_created_at"] and start_utc <= r["review_created_at"] < end_utc]
     replied = [r for r in revs if r["has_reply"]]

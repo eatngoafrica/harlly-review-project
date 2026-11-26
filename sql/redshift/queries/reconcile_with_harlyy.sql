@@ -46,7 +46,8 @@ incs AS (
     SELECT i.*
     FROM harlyy_feedback_analytics.incidents i
     CROSS JOIN win w
-    WHERE i.is_survey_incident AND i.created_at >= w.start_utc AND i.created_at < w.end_utc
+    -- Harlyy's Total Incidents: survey, review and actionable photo / document incidents
+    WHERE i.counts_in_harlyy AND i.created_at >= w.start_utc AND i.created_at < w.end_utc
 ),
 revs AS (
     SELECT r.*

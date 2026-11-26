@@ -5,7 +5,8 @@ against the previous period of the same length.
 Needs sql/redshift/03_reporting_views.sql. Set the period (Lagos dates) in params.
 
 Harlyy shows the change as points for Smile Score and Resolved, and as a percent for
-counts; both are given here. Review stars are all-time averages per platform, as
+counts; both are given here. Review stars are averages of the reviews we hold (from 2026; Harlyy's card averages each
+listing's whole history, so shows more), as
 Harlyy shows them; the review counts are for the period.
 
 Comparing with the dashboard: pick a custom range of whole days in Harlyy. Its
@@ -36,8 +37,29 @@ surveys AS (
     WHERE d.created_date BETWEEN p.prev_start AND p.end_date
     GROUP BY 1
 ),
-cur AS (SELECT * FROM surveys WHERE period = 'current'),
-prev AS (SELECT * FROM surveys WHERE period = 'previous'),
+-- Harlyy's Total Incidents also counts incidents with no survey (counts_in_harlyy):
+-- review incidents (since 21 Nov 2026) and actionable photo / document incidents.
+-- Counted by the Lagos day the incident was created.
+review_incs AS (
+    SELECT CASE WHEN DATEADD(hour, 1, i.created_at)::date >= p.start_date THEN 'current' ELSE 'previous' END AS period,
+           COUNT(*)                                               AS incidents,
+           SUM(CASE WHEN i.status = 'resolved' THEN 1 ELSE 0 END) AS resolved
+    FROM harlyy_feedback_analytics.incidents i
+    CROSS JOIN periods p
+    WHERE i.counts_in_harlyy AND NOT i.is_survey_incident
+      AND DATEADD(hour, 1, i.created_at)::date BETWEEN p.prev_start AND p.end_date
+    GROUP BY 1
+),
+totals AS (
+    SELECT s.period, s.submissions,
+           s.incidents + COALESCE(ri.incidents, 0) AS incidents,
+           s.resolved  + COALESCE(ri.resolved, 0)  AS resolved,
+           s.smile_points, s.smile_weight, s.r1, s.r2, s.r3, s.r4, s.r5
+    FROM surveys s
+    LEFT JOIN review_incs ri ON ri.period = s.period
+),
+cur AS (SELECT * FROM totals WHERE period = 'current'),
+prev AS (SELECT * FROM totals WHERE period = 'previous'),
 reviews AS (
     SELECT r.source,
            SUM(CASE WHEN r.review_date BETWEEN p.start_date AND p.end_date THEN 1 ELSE 0 END) AS reviews_in_period,

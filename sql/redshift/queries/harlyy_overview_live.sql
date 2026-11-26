@@ -5,7 +5,9 @@ to edit. Same cards as harlyy_overview.sql (which takes whole Lagos days instead
 
 Harlyy's window runs to the current minute; ours ends at the last hourly load (about :10
 past the hour), so in between, Harlyy can show a few more submissions than this.
-Review stars are all-time averages per platform, as Harlyy shows them.
+Review stars: average of the reviews we hold (posted from 1 Jan 2026, plus older ones
+Harlyy has re-synced). Harlyy's 3rd Party Reviews card averages each listing's whole
+history, so it shows more (25 Nov 2026: Google 4.1 vs ours 4.0, Chowdeck 3.3 vs 2.9).
 */
 WITH params AS (
     SELECT GETDATE() AS end_at,           -- now (UTC, as the tables store it)
@@ -59,8 +61,29 @@ surveys AS (
     LEFT JOIN incs i    ON i.submission_id = x.submission_id
     GROUP BY x.period
 ),
-cur AS (SELECT * FROM surveys WHERE period = 'current'),
-prev AS (SELECT * FROM surveys WHERE period = 'previous'),
+-- Harlyy's Total Incidents also counts incidents with no survey (counts_in_harlyy):
+-- review incidents (since 21 Nov 2026) and actionable photo / document incidents.
+-- Counted by when the incident was created.
+review_incs AS (
+    SELECT CASE WHEN i.created_at >= p.start_at THEN 'current' ELSE 'previous' END AS period,
+           COUNT(*)                                               AS incidents,
+           SUM(CASE WHEN i.status = 'resolved' THEN 1 ELSE 0 END) AS resolved
+    FROM harlyy_feedback_analytics.incidents i
+    CROSS JOIN periods p
+    WHERE i.counts_in_harlyy AND NOT i.is_survey_incident
+      AND i.created_at >= p.prev_start AND i.created_at < p.end_at
+    GROUP BY 1
+),
+totals AS (
+    SELECT s.period, s.submissions,
+           s.incidents + COALESCE(ri.incidents, 0) AS incidents,
+           s.resolved  + COALESCE(ri.resolved, 0)  AS resolved,
+           s.smile_points, s.smile_weight, s.r1, s.r2, s.r3, s.r4, s.r5
+    FROM surveys s
+    LEFT JOIN review_incs ri ON ri.period = s.period
+),
+cur AS (SELECT * FROM totals WHERE period = 'current'),
+prev AS (SELECT * FROM totals WHERE period = 'previous'),
 reviews AS (
     SELECT r.source,
            SUM(CASE WHEN r.review_created_at >= p.start_at AND r.review_created_at < p.end_at

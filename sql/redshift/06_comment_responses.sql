@@ -23,6 +23,10 @@
 -- has_response      TRUE when replied, in review or resolved
 -- action_priority   1 negative, no response   2 mixed, no response   3 positive, no response
 --                   4 responded               5 survey comment with no incident (FYI only)
+--                   6 old review: not replied but posted more than 7 days ago. History
+--                     only, do NOT contact the customer. Harlyy re-syncs old Google
+--                     reviews in bulk (some from 2021-2022); they keep their real
+--                     posting date (commented_at_utc), so age is judged by that.
 -- hours_to_response comment -> first response (review reply; or the first of incident
 --                   reviewed, resolved or first staff note)
 -- hours_waiting     comment -> now, while there is no response
@@ -158,6 +162,8 @@ SELECT c.*,
        c.response_status IN ('Replied', 'Resolved', 'In review')             AS has_response,
        CASE WHEN c.response_status = 'No incident raised'                     THEN 5
             WHEN c.response_status IN ('Replied', 'Resolved', 'In review')    THEN 4
+            WHEN c.source <> 'survey'
+             AND c.commented_at_utc < DATEADD(day, -7, GETDATE())             THEN 6
             WHEN c.tone = 'negative'                                          THEN 1
             WHEN c.tone = 'mixed'                                             THEN 2
             ELSE 3 END                                                        AS action_priority,
@@ -198,10 +204,10 @@ WITH NO SCHEMA BINDING;
 -- SELECT COALESCE(regional_manager, 'Not set') AS regional_manager, source,
 --        COUNT(*)                                                       AS comments,
 --        SUM(CASE WHEN tone = 'negative' THEN 1 ELSE 0 END)             AS negative,
---        SUM(CASE WHEN action_priority < 5 THEN 1 ELSE 0 END)           AS needing_response,
---        SUM(CASE WHEN action_priority < 5 AND has_response THEN 1 ELSE 0 END) AS responded,
---        ROUND(100.0 * SUM(CASE WHEN action_priority < 5 AND has_response THEN 1 ELSE 0 END)
---              / NULLIF(SUM(CASE WHEN action_priority < 5 THEN 1 ELSE 0 END), 0), 1) AS response_rate_pct,
+--        SUM(CASE WHEN action_priority <> 5 THEN 1 ELSE 0 END)          AS needing_response,
+--        SUM(CASE WHEN action_priority <> 5 AND has_response THEN 1 ELSE 0 END) AS responded,
+--        ROUND(100.0 * SUM(CASE WHEN action_priority <> 5 AND has_response THEN 1 ELSE 0 END)
+--              / NULLIF(SUM(CASE WHEN action_priority <> 5 THEN 1 ELSE 0 END), 0), 1) AS response_rate_pct,
 --        ROUND(AVG(hours_to_response), 1)                               AS avg_hours_to_response,
 --        SUM(CASE WHEN action_priority IN (1, 2, 3) THEN 1 ELSE 0 END)  AS still_waiting
 -- FROM harlyy_feedback_analytics.vw_comment_responses

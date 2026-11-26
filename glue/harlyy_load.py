@@ -3,7 +3,7 @@
 Loads one extract run into Redshift Serverless through the Data API (IAM auth):
 
   1. read the run's manifest; a run with no new or changed submissions, incidents
-     or reviews is skipped, so Redshift is not woken for nothing
+     or reviews (ours or competitors') is skipped, so Redshift is not woken for nothing
   2. in parallel: check the target tables still have the columns the files were
      written with, and stage (empty each staging table, COPY its Parquet file in)
      as STAGE_GROUPS batches running side by side
@@ -46,17 +46,22 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 TABLE_ORDER = ["submissions", "submission_answers", "incidents", "incident_metrics", "incident_comments",
-               "reviews", "locations", "location_labels", "labels", "surveys", "survey_steps", "step_options",
-               "metrics", "staff"]
+               "reviews", "review_topics", "competitor_reviews", "competitor_review_topics",
+               "locations", "location_labels", "labels", "surveys", "survey_steps", "step_options",
+               "metrics", "staff", "review_categories", "competitor_listings", "brands"]
 # Staging batches that run side by side, roughly balanced by size (answers are the
 # largest table). Kept to a handful so the Data API's limit on active statements
 # per workgroup is never reached.
 STAGE_GROUPS = [["submission_answers"],
                 ["submissions", "incidents", "incident_metrics", "incident_comments"],
-                ["reviews", "locations", "location_labels"],
-                ["labels", "surveys", "survey_steps", "step_options", "metrics", "staff"]]
+                ["reviews", "review_topics", "competitor_reviews", "competitor_review_topics",
+                 "locations", "location_labels"],
+                ["labels", "surveys", "survey_steps", "step_options", "metrics", "staff",
+                 "review_categories", "competitor_listings", "brands"]]
 CHILDREN = {"submission_answers": ("submissions", "submission_id"), "incident_metrics": ("incidents", "incident_id"),
-            "incident_comments": ("incidents", "incident_id"), "location_labels": ("locations", "location_id"), "step_options": ("survey_steps", "step_id")}
+            "incident_comments": ("incidents", "incident_id"), "location_labels": ("locations", "location_id"),
+            "step_options": ("survey_steps", "step_id"), "review_topics": ("reviews", "review_id"),
+            "competitor_review_topics": ("competitor_reviews", "competitor_review_id")}
 MAX_ATTEMPTS = 3
 REQUEUE_DELAY_SECONDS = 600
 RETRIES = 3
