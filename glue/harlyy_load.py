@@ -107,7 +107,9 @@ def staging_checks_sql(manifest, staging):
         info = manifest["tables"].get(name)
         if not info:
             continue
-        unique = ", ".join(f"COALESCE({c}, '')" for c in info["unique"])
+        # As text: an identifying column can be a number (review_topics.sentence_no), and
+        # COALESCE(<integer>, '') fails in Redshift ("invalid input syntax for integer").
+        unique = ", ".join(f"COALESCE(CAST({c} AS VARCHAR), '')" for c in info["unique"])
         blank = f"SUM(CASE WHEN {info['key']} IS NULL OR {info['key']} = '' THEN 1 ELSE 0 END)" if info["key"] else "0"
         distinct = (f"COUNT(DISTINCT {unique})" if len(info["unique"]) == 1 else
                     f"(SELECT COUNT(*) FROM (SELECT DISTINCT {unique} FROM {staging}.{name}))")
